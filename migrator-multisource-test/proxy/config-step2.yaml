@@ -1,0 +1,28 @@
+# Step 2: one virtual cluster (dest-a, prefix "a_") in front of redpanda-dest, reached from the
+# host-side Go tests on localhost:9192 (broker node 0 on 9193).
+# Schema: Kroxylicious 0.24.0 (virtualClusters[].gateways[].portIdentifiesNode, filterDefinitions,
+# per-virtual-cluster filters).
+management:
+  endpoints:
+    prometheus: {}
+virtualClusters:
+  - name: dest-a
+    targetCluster:
+      bootstrapServers: redpanda-dest:9092
+    gateways:
+      - name: host
+        portIdentifiesNode:
+          bootstrapAddress: localhost:9192
+          nodeIdRanges:
+            - name: default
+              start: 0
+              end: 0
+    filters:
+      - cg-prefix-a
+    logNetwork: false
+    logFrames: false
+filterDefinitions:
+  - name: cg-prefix-a
+    type: demo.cgprefix.ConsumerGroupPrefix
+    config:
+      prefix: "a_"

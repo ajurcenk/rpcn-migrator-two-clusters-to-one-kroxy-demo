@@ -1,0 +1,40 @@
+# Step 2: single Redpanda destination + Kroxylicious with the ConsumerGroupPrefix filter.
+# Tests run on the host (go test), talking to the proxy on localhost:9192 and to Redpanda
+# directly on localhost:19092.
+name: cgprefix-step2
+
+services:
+  redpanda-dest:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.2
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda-dest:9092,external://localhost:19092
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr=redpanda-dest:33145
+      - --advertise-rpc-addr=redpanda-dest:33145
+    ports:
+      - "19092:19092"
+      - "18081:18081"
+      - "19644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  kroxylicious:
+    build: ../kroxylicious-filter
+    image: cgprefix-proxy:0.24.0
+    command: --config /opt/kroxylicious/config/proxy-config.yaml
+    volumes:
+      - ../proxy/config-step2.yaml:/opt/kroxylicious/config/proxy-config.yaml:ro,z
+    ports:
+      - "9192-9193:9192-9193"
+      - "9190:9190"
+    depends_on:
+      redpanda-dest:
+        condition: service_healthy

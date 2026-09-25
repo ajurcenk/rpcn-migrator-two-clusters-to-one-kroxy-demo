@@ -6,6 +6,7 @@ set -euo pipefail
 CONNECT="${MIGRATOR_SRC:?set MIGRATOR_SRC to a Redpanda Connect v4.100.0 checkout}/connect"
 MODCACHE="${GOMODCACHE:-$(go env GOMODCACHE)}"
 declare -A PREFIX=(
+  [LOCAL]="$(cd "$(dirname "$0")/.." && pwd)"
   [CONNECT]="$CONNECT"
   [MIG]="$CONNECT/internal/impl/redpanda/migrator"
   [KAFKA]="$CONNECT/internal/impl/kafka"

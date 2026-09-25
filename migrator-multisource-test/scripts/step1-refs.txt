@@ -1,5 +1,5 @@
 # <path relative to prefix>|<line>|<substring expected on that line>
-# Prefixes: MIG= migrator pkg, KAFKA= connect kafka pkg, KGO= franz-go kgo, KADM= kadm, KMSG= kmsg, CONNECT= connect module root
+# Prefixes: LOCAL= this project, MIG= migrator pkg, KAFKA= connect kafka pkg, KGO= franz-go kgo, KADM= kadm, KMSG= kmsg, CONNECT= connect module root
 CONNECT/go.mod|*|github.com/twmb/franz-go v1.20.7
 CONNECT/go.mod|*|github.com/twmb/franz-go/pkg/kadm v1.17.2
 CONNECT/go.mod|*|github.com/twmb/franz-go/pkg/kmsg v1.12.0
@@ -32,3 +32,7 @@ KGO/consumer_group_848.go|21|opt_in_kafka_next_gen_balancer_beta
 KMSG/generated.go|10967|func (*OffsetCommitRequest) MaxVersion() int16            { return 9 }
 KMSG/generated.go|11707|func (*OffsetFetchRequest) MaxVersion() int16            { return 9 }
 KMSG/generated.go|12839|func (*FindCoordinatorRequest) MaxVersion() int16          { return 6 }
+# The Go test module must use the migrator's franz-go versions (LOCAL = migrator-multisource-test/)
+LOCAL/tests/go.mod|*|github.com/twmb/franz-go v1.20.7
+LOCAL/tests/go.mod|*|github.com/twmb/franz-go/pkg/kadm v1.17.2
+LOCAL/tests/go.mod|*|github.com/twmb/franz-go/pkg/kmsg v1.12.0
