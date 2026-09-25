@@ -1,0 +1,133 @@
+# Step 3: sources redpanda-a / redpanda-b, destination redpanda-dest, one Kroxylicious proxy per
+# source, one migrator per source. Start order (see Makefile step3): brokers and proxies healthy ->
+# seed data from the host -> `--profile migrators up` starts the migrators.
+#
+# Host ports: A kafka 19092 / SR 18081, B 29092 / 28081, dest 39092 / 38081;
+# proxy metrics: A 19190, B 29190.
+name: cgprefix-step3
+
+x-redpanda-image: &redpanda-image docker.redpanda.com/redpandadata/redpanda:v26.2.2
+x-proxy-health: &proxy-health
+  test: ["CMD", "curl", "-sf", "localhost:9190/livez"]
+  interval: 2s
+  timeout: 5s
+  retries: 30
+x-redpanda-health: &redpanda-health
+  test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+  interval: 2s
+  timeout: 5s
+  retries: 30
+
+services:
+  redpanda-a:
+    image: *redpanda-image
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda-a:9092,external://localhost:19092
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr=redpanda-a:33145
+      - --advertise-rpc-addr=redpanda-a:33145
+    ports:
+      - "19092:19092"
+      - "18081:18081"
+      - "19644:9644"
+    healthcheck: *redpanda-health
+
+  redpanda-b:
+    image: *redpanda-image
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:29092
+      - --advertise-kafka-addr=internal://redpanda-b:9092,external://localhost:29092
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:28081
+      - --rpc-addr=redpanda-b:33145
+      - --advertise-rpc-addr=redpanda-b:33145
+    ports:
+      - "29092:29092"
+      - "28081:28081"
+      - "29644:9644"
+    healthcheck: *redpanda-health
+
+  redpanda-dest:
+    image: *redpanda-image
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:39092
+      - --advertise-kafka-addr=internal://redpanda-dest:9092,external://localhost:39092
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:38081
+      - --rpc-addr=redpanda-dest:33145
+      - --advertise-rpc-addr=redpanda-dest:33145
+    ports:
+      - "39092:39092"
+      - "38081:38081"
+      - "39644:9644"
+    healthcheck: *redpanda-health
+
+  kroxylicious-a:
+    build: ../kroxylicious-filter
+    image: cgprefix-proxy:0.24.0
+    command: --config /opt/kroxylicious/config/proxy-config.yaml
+    volumes:
+      - ../proxy/config-step3-a.yaml:/opt/kroxylicious/config/proxy-config.yaml:ro,z
+    healthcheck: *proxy-health
+    ports:
+      - "19190:9190"
+    depends_on:
+      redpanda-dest:
+        condition: service_healthy
+
+  kroxylicious-b:
+    build: ../kroxylicious-filter
+    image: cgprefix-proxy:0.24.0
+    command: --config /opt/kroxylicious/config/proxy-config.yaml
+    volumes:
+      - ../proxy/config-step3-b.yaml:/opt/kroxylicious/config/proxy-config.yaml:ro,z
+    healthcheck: *proxy-health
+    ports:
+      - "29190:9190"
+    depends_on:
+      redpanda-dest:
+        condition: service_healthy
+
+  migrator-a:
+    image: docker.redpanda.com/redpandadata/connect:4.100.0
+    profiles: [ migrators ]
+    command: [ "run", "/cfg/migrator-a.yaml" ]
+    environment:
+      # Empty = use the config default (kroxylicious-a:9192). The negative control sets it to
+      # redpanda-dest:9092 to bypass the proxy.
+      DEST_BROKERS: ${DEST_BROKERS:-}
+    volumes:
+      - ../migrator:/cfg:ro,z
+    depends_on:
+      redpanda-a:
+        condition: service_healthy
+      kroxylicious-a:
+        condition: service_healthy
+
+  migrator-b:
+    image: docker.redpanda.com/redpandadata/connect:4.100.0
+    profiles: [ migrators ]
+    command: [ "run", "/cfg/migrator-b.yaml" ]
+    environment:
+      # Empty = use the config default (kroxylicious-b:9192). The negative control sets it to
+      # redpanda-dest:9092 to bypass the proxy.
+      DEST_BROKERS: ${DEST_BROKERS:-}
+    volumes:
+      - ../migrator:/cfg:ro,z
+    depends_on:
+      redpanda-b:
+        condition: service_healthy
+      kroxylicious-b:
+        condition: service_healthy
+

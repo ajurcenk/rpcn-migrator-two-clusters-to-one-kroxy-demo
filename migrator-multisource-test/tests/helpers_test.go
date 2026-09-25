@@ -105,3 +105,19 @@ func commit(t *testing.T, ctx context.Context, adm *kadm.Client, group, topic st
 		t.Fatalf("commit %s %s/%d=%d: %v", group, topic, partition, at, err)
 	}
 }
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

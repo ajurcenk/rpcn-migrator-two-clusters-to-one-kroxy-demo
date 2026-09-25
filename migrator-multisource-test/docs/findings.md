@@ -36,7 +36,7 @@ Step 3 must observe and record what actually happens. It could also add a varian
 
 1. ~~Kroxylicious ApiVersions cap~~: answered in Step 2 below.
 2. ~~Redpanda OffsetFetch v8+ with duplicate `Groups[]` entries~~: the migrator-shaped call with duplicates works through the proxy (Step 2, test `4b`). The filter rewrites each entry on its own and never relies on response order, so whether Redpanda deduplicates doesn't matter. Not inspected further.
-3. **The exact error code** Redpanda returns for a generation `-1` OffsetCommit to a `Stable` group (negative control, variant a). Still open for Step 3.
+3. ~~The exact error code for a generation `-1` commit to a `Stable` group~~: `UNKNOWN_MEMBER_ID`, observed in Step 3's negative control.
 
 ## Step 2: ConsumerGroupPrefix filter
 
@@ -84,3 +84,60 @@ Step 3 must observe and record what actually happens. It could also add a varian
 
 - `MultiTenant` (built in): see spec §8. It also rewrites topics, so it would double-prefix alongside the migrator's `topic:` interpolation.
 - The v0.24.0 BOM also ships `kroxylicious-entity-isolation`, which hasn't been examined yet. It may offer per-virtual-cluster group isolation without a custom filter. Worth a look before recommending the custom filter for production.
+
+## Step 3: three clusters, two proxies, two migrators
+
+`make step3` passes from a clean state (exit 0, stack torn down). `make step3-negative` reproduces the collision.
+
+### Results (with proxies)
+
+| Check (spec §7.4) | Result |
+|---|---|
+| Topics `a_orders`, `a_payments`, `b_orders`, `b_payments`; no `orders`/`payments` | pass |
+| Partition counts match the source (3 / 1) | pass |
+| Every record at the same partition/offset with the same value; `a_*` only `A-…`, `b_*` only `B-…`; `x-source-cluster` = that source's cluster ID | pass (all 2,200 records) |
+| Groups `a_app-group`, `b_app-group`; no `app-group`, `migrator`, `a_migrator`, `b_migrator` | pass |
+| Translated offsets point at the same record | pass, **exact**: A orders/0 500→500; B orders/0 250→250, payments/0 100→100 |
+| Live sync: A's group moved to 610 → `a_app-group` followed within one 10s cycle; `b_app-group` unchanged after > 2 cycles | pass |
+| New records on both sources arrive in the right prefixed topics | pass |
+| Migrator logs: no WARN/ERROR at all; group offsets committed | pass |
+| Proxy logs: each proxy rewrote `app-group` only to its own prefix, never saw an unprefixed response group | pass |
+| Schema subjects `a_orders-value`, `b_orders-value`; no `orders-value` | pass |
+
+Wire traffic per proxy per sync cycle was exactly the Step 1 prediction: FindCoordinator v4 (once, then cached), OffsetFetch v8 and OffsetCommit v8, all rewritten.
+
+### Negative control (no proxies): observed
+
+- **Plain run:** both migrators write into **one shared destination group `app-group`**, holding `a_orders/0=500`, `b_orders/0=250` and `b_payments/0=100`. **There are no errors in either migrator's log.** This matches the Step 1 prediction: the two sources don't overwrite each other's partitions, because the topic names already differ, but the groups can't be told apart.
+- **With an active consumer:** an application consumer joined `app-group` on the destination (subscribed to `a_orders`, group `Stable`), then source A moved its group. migrator-a logged, every cycle:
+  `level=error msg="Consumer group migration: failed to update offset for group 'app-group' topic 'a_orders' partition 0: UNKNOWN_MEMBER_ID: The coordinator is not aware of this member."`
+  The destination offset stayed at 500 (the source was at 605). migrator-b logged nothing.
+
+### Deviations from the spec
+
+- **The migrator image is the published `docker.redpanda.com/redpandadata/connect:4.100.0`, not a source build** (the user's decision). The spec's reasons for a source build don't apply for an unpatched test, and the source build needs the whole Connect tree compiled with Go 1.26.5, which is slow. The image reports `Version: 4.100.0` and includes `redpanda_migrator`. `migrator/Dockerfile` (a source build) is kept for a possible patched migrator, but it is **untested**: its first build was stopped.
+- **The input and output have no `label`.** The migrator pairs input and output by label, and they must match (`migrator.go:98-99`), but `lint` rejects duplicate labels ("label 'migrator_a' collides…"). Without labels, both fall back to `"default"` and still pair up (`migrator.go:323-326`); that's safe with one migrator per config file. Both configs pass `lint`.
+- **Orders are spread 60/20/20** across partitions 0/1/2, rather than evenly. That way A's `orders/0=500` is inside the partition (A: 600 records, B: 420). With an even three-way split, partition 0 would hold only 334, and the migrator skips offsets beyond the partition end.
+- **The seed's `app-group` is created with a kadm offset commit**, not by running a consumer and stopping it. The result is the same: an `Empty` group with committed offsets.
+- **`offset_header: "x-source-offset"` is set**, which gives exact translation for `Empty` groups. That's why offsets match 1:1. **Timestamp-only translation was not measured** (see open questions).
+- **The proxies needed a healthcheck** (`curl -sf localhost:9190/livez`). The 0.24.0 image defines none, so `depends_on: service_healthy` never succeeded.
+- **The output's `seed_brokers` is `${DEST_BROKERS:kroxylicious-X:9192}`**, so the negative control reuses the same config files with `DEST_BROKERS=redpanda-dest:9092`.
+
+### Caveats
+
+- **Active destination consumers block group sync, with or without the proxy.** The negative control's `UNKNOWN_MEMBER_ID` is the broker rejecting the migrator's commits (made outside any group generation) to a group that has live members. An application consuming `a_app-group` on the destination while migrator-a is still syncing would cause the same errors through the proxy. Stop consumers on the destination (or stop group sync) at cutover.
+- **All of a migrator's destination traffic goes through its proxy**, including Produce, not just group APIs. The migrator uses a single client for its whole output (`migrator.go:547-560`), so group traffic can't be routed separately. Each proxy is an extra hop for data and a single point of failure *for its own source*; having one proxy per source keeps A and B independent.
+- **Kroxylicious version compatibility.** The versions negotiated with Redpanda v26.2.2 are FindCoordinator v4, OffsetFetch v8 and OffsetCommit v8. The 0.24.0 proxy can decode up to v6 / v10 / v10, so there's headroom for Redpanda upgrades. The proxy rejects OffsetCommit below v2 and OffsetFetch below v1.
+- **Timestamp-based translation** (without `offset_header`) can be imprecise when several records share a millisecond timestamp, and destination offsets never move backward. The exact matches here come from `offset_header`.
+- The migrator loaded a built-in `open_source` license by itself (`Successfully loaded Redpanda license … license_type=open_source`); no license key was needed for `redpanda_migrator` 4.100.0.
+
+### Alternatives (spec §8), from reading the v0.24.0 source; neither was run
+
+- **`MultiTenant`** prefixes topics, group IDs and transactional IDs with `<virtual cluster name><separator>` (the separator defaults to `-`; `MultiTenantConfig.prefixResourceNameSeparator`), and hides unprefixed resources. Combined with the migrator's `topic: 'a_…'` setting it would double-prefix (`dest-a-a_orders`). It could replace both mechanisms with virtual clusters named `a`/`b`, `prefixResourceNameSeparator: "_"`, and a migrator `topic: '${! @kafka_topic }'`. But it also renames transactional IDs and covers more APIs, which would need retesting. It is also marked internally as a POC (`// TODO naive - POC implementation uses virtual cluster name as a tenant prefix`).
+- **`EntityIsolation`** (`kroxylicious-entity-isolation`) isolates **only group IDs and transactional IDs** (`TOPIC_NAME` is rejected as not supported), which is exactly the scope needed here. It also covers ACL and config requests addressing groups, which the custom filter doesn't. Its only mapper (`PrincipalEntityNameMapper`) derives the prefix from the **authenticated principal** (`<principal><separator><group>`), and it's an error if a connection has no authenticated subject. It would need SASL on the proxy's client side, with each migrator's output authenticating as its own principal. **It's the strongest candidate to replace the custom filter in production**, but it needs its own test.
+
+### Open questions
+
+1. **Timestamp-only offset translation.** Run Step 3 without `offset_header` and measure how far offsets deviate from the source positions.
+2. **`EntityIsolation` with SASL.** Worth a spike: principals `migrator-a`/`migrator-b`, then confirm FindCoordinator v4 and OffsetFetch v8 stripping works for franz-go the same way as with the custom filter.
+3. **Cutover procedure:** the order for stopping group sync and starting destination consumers, given the `UNKNOWN_MEMBER_ID` behavior.

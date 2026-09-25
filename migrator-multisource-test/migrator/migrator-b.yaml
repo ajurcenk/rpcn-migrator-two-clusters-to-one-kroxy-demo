@@ -1,0 +1,30 @@
+# Source B -> destination. The input reads redpanda-b directly; the output (topics, records,
+# consumer group offsets) goes through proxy kroxylicious-b, which prefixes group IDs with "b_".
+# Schema Registry is HTTP and goes straight to redpanda-dest.
+#
+# No `label`s: the migrator pairs input and output by label (they must match), but `lint`
+# rejects duplicate labels. Unlabelled, both fall back to "default" and still pair up
+# (migrator.go:323-326), which is safe with one migrator per config file.
+input:
+  redpanda_migrator:
+    seed_brokers: [ "redpanda-b:9092" ]
+    regexp_topics_include: [ '.' ]
+    regexp_topics_exclude: [ '^_' ]
+    consumer_group: migrator
+    schema_registry:
+      url: http://redpanda-b:8081
+
+output:
+  redpanda_migrator:
+    seed_brokers: [ "${DEST_BROKERS:kroxylicious-b:9192}" ]
+    topic: 'b_${! @kafka_topic }'
+    provenance_header: "x-source-cluster"
+    offset_header: "x-source-offset"
+    schema_registry:
+      url: http://redpanda-dest:8081
+      subject: 'b_${! metadata("schema_registry_subject") }'
+      translate_ids: true
+    consumer_groups:
+      enabled: true
+      interval: 10s
+      exclude: [ "^migrator$" ]

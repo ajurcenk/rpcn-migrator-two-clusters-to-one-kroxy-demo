@@ -1,0 +1,27 @@
+# Step 3, proxy for source B: the Step 2 layout (one virtual cluster, one filter) with its own
+# prefix. migrator-b's output connects to kroxylicious-b:9192 (broker node 0 on :9193); the
+# advertised host is this container's name, so migrator-b never gets routed to the other proxy.
+management:
+  endpoints:
+    prometheus: {}
+virtualClusters:
+  - name: dest-b
+    targetCluster:
+      bootstrapServers: redpanda-dest:9092
+    gateways:
+      - name: compose
+        portIdentifiesNode:
+          bootstrapAddress: kroxylicious-b:9192
+          nodeIdRanges:
+            - name: default
+              start: 0
+              end: 0
+    filters:
+      - cg-prefix-b
+    logNetwork: false
+    logFrames: false
+filterDefinitions:
+  - name: cg-prefix-b
+    type: demo.cgprefix.ConsumerGroupPrefix
+    config:
+      prefix: "b_"

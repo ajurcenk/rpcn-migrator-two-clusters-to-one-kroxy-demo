@@ -44,3 +44,30 @@ make step2-down
 ```
 
 Rewrite logging is controlled with `CG_PREFIX_LOG_LEVEL` on the proxy container (default `DEBUG`). Log lines look like `api=OFFSET_FETCH version=8 request group 'app-group' -> 'a_app-group'`. The counter `kroxylicious_consumer_group_prefix_rewrites_total{api,direction,prefix}` is on the Prometheus endpoint.
+
+## Step 3: two sources into one destination
+
+```sh
+make step3            # brokers + proxies -> seed -> migrators -> assertions + log checks -> tear down
+make step3-negative   # same, but both migrators write straight to redpanda-dest (no proxies)
+```
+
+`compose/docker-compose.step3.yaml` runs:
+- `redpanda-a`, `redpanda-b`, `redpanda-dest` (Redpanda `v26.2.2`; host ports: Kafka 19092 / 29092 / 39092, Schema Registry 18081 / 28081 / 38081)
+- one proxy per source: `kroxylicious-a` (prefix `a_`, `proxy/config-step3-a.yaml`, metrics on 19190) and `kroxylicious-b` (prefix `b_`, 29190)
+- `migrator-a` / `migrator-b` (profile `migrators`)
+
+The migrators use the published image `docker.redpanda.com/redpandadata/connect:4.100.0` with `migrator/migrator-{a,b}.yaml`. Each output's `seed_brokers` defaults to its own proxy; `DEST_BROKERS` overrides it for the negative control. Validate the configs with:
+
+```sh
+docker run --rm -v "$PWD/migrator:/cfg:ro,z" docker.redpanda.com/redpandadata/connect:4.100.0 lint /cfg/migrator-a.yaml
+```
+
+`tests/step3_e2e_test.go` (build tag `step3`) has four tests:
+- `TestStep3Seed` seeds both sources before the migrators start.
+- `TestStep3Replicated` and `TestStep3LiveSync` assert against the brokers directly, bypassing the proxies.
+- `TestStep3NegativeControl` records the collision.
+
+`scripts/step3-check-logs.sh` checks the migrator and proxy logs. Individual stages: `make step3-up`, `step3-seed`, `step3-migrators`, `step3-test`, `step3-down`.
+
+`migrator/Dockerfile` builds Connect from the v4.100.0 source instead. It is untested and not used; see `docs/findings.md`.

@@ -4,7 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-This repo is currently spec-only. `docs/MIGRATOR_MULTI_SOURCE_TEST_PLAN.md` is the authoritative task specification, written for Claude Code. Work through its steps in order (Step 1 → 2 → 3). Do not start a step until the previous step's acceptance criteria pass. When the spec and this file disagree, the spec wins. Update this file once real build/test commands exist.
+`docs/MIGRATOR_MULTI_SOURCE_TEST_PLAN.md` is the task specification. Steps 1-3 are implemented in `migrator-multisource-test/`. Results, deviations from the spec, and open questions are in `migrator-multisource-test/docs/findings.md`; read it before changing anything.
+
+## Commands (run from `migrator-multisource-test/`)
+
+| Command | What it does |
+|---|---|
+| `make step1-verify` | Checks the file:line references in the Step 1 inventory against the migrator source, the franz-go module cache, and `tests/go.mod` |
+| `make filter-test` | Filter unit tests (Maven in `maven:3.9-eclipse-temurin-21`, `~/.m2` mounted; no local Maven) |
+| `make step2` | Unit tests + proxy integration test on a fresh stack, then tear down |
+| `make step3` / `make step3-negative` | End-to-end run with / without proxies, then tear down |
+| `make step2-up` / `step2-test` / `step2-down` | Iterate on a running Step 2 stack (same pattern for `step3-*`) |
+
+Run a single test:
+- Java: `$(MVN) -Dtest=ConsumerGroupPrefixFilterTest#offsetFetchIsPrefixedAndStripped test` (the `MVN` docker command is in the Makefile)
+- Go: `cd tests && go test -tags step2 -run 'TestStep2Proxy/4b' -v ./...`. Go tests are split by build tag (`step2`, `step3`) and expect the matching stack to be running.
 
 ## What this project proves
 
@@ -24,11 +38,13 @@ Two Redpanda Migrator pipelines replicate source clusters A and B into one desti
 
 Read `kroxy-linking-demo` end to end before writing filter code. It is the source of truth for the Kroxylicious version, the build tool, how the filter JAR reaches the proxy classpath, the proxy YAML schema, and Compose conventions. The Kroxylicious config schema has changed across releases, so do not trust config snippets from memory or from the spec over the demo.
 
-## Planned layout and commands
+## Layout decisions that span files
 
-Everything goes under `migrator-multisource-test/`: `kroxylicious-filter/` (Java plugin), `proxy/`, `migrator/`, `compose/`, `tests/` (Go), `docs/`. The planned Makefile targets are `step1-verify`, `step2`, `step3`, and `clean`. `make step3` must bring the stack up, seed data, run the migrators and assertions, tear down, and exit 0. Record the exact migrator image build command in the README.
-
-Validate migrator configs with `rpk connect lint` (or the built binary's `lint` subcommand). If v4.100.0 field names differ from the spec, follow the source code and record the difference in `docs/findings.md`.
+- **One Kroxylicious proxy per source** (`kroxylicious-a`/`-b`), each running the Step 2 config shape with its own prefix. The user chose this over one proxy with two virtual clusters.
+- **Kroxylicious 0.24.0 everywhere** (`kroxylicious-filter/pom.xml`, `Dockerfile` base image). Read the Kroxylicious source at the `v0.24.0` tag; the local checkout is ahead of it.
+- **The migrator is the published `connect:4.100.0` image**, not a source build (the user's decision).
+- **The test module (`tests/go.mod`) must stay on the migrator's franz-go versions** (v1.20.7 / kadm v1.17.2 / kmsg v1.12.0). `go mod tidy` with no imports will silently upgrade them; `make step1-verify` catches it.
+- **Migrator configs have no `label`**, because `lint` rejects matching input/output labels; unlabelled, both pair up as `"default"`.
 
 ## Constraints that are easy to get wrong
 
@@ -42,4 +58,9 @@ Validate migrator configs with `rpk connect lint` (or the built binary's `lint` 
 - **Exclude the migrator's own group** with `consumer_groups.exclude: ["^migrator$"]`, and assert that no `migrator`, `a_migrator`, or `b_migrator` group exists on the destination.
 - **Test clients:** use Go with franz-go (`kgo`/`kadm`/`kmsg`) so tests exercise the same request versions as the migrator. Run e2e assertions directly against `redpanda-dest`, bypassing the proxy.
 - **Offset assertions:** translation is timestamp-based by default. It can be imprecise when records share a millisecond timestamp, and destination offsets never move backward, so assert within tolerance.
-- **Findings:** record ambiguities, fallbacks (such as using a published image), and the negative-control results (migrators pointed directly at the destination) in `docs/findings.md`.
+- **Findings:** record ambiguities, fallbacks, and observed results in `docs/findings.md`.
+- **Redpanda quirks already found** (they also happen without the proxy):
+  - OffsetFetch v1 returns no offsets.
+  - Deleting an Empty group's last offset deletes the group.
+  - Commits to a `Stable` destination group fail with `UNKNOWN_MEMBER_ID`.
+- **Proxy DEBUG log lines** look like `api=OFFSET_FETCH version=8 request group 'x' -> 'a_x'`. The logger name prints abbreviated as `de.cg.ConsumerGroupPrefixFilter`, so grep for that, not `demo.cgprefix`.
