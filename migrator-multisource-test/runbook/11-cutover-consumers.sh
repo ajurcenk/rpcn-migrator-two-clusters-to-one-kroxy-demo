@@ -3,7 +3,8 @@
 # a_orders / a_payments as group a_app-group; source B's as b_app-group. They run until they
 # have been idle for 15s. Then each partition is checked: the first record read on the destination
 # must be the source record at the source group's final committed offset (no gaps, no re-reads),
-# and the consumers must have read to the end.
+# and the consumers must have read to the end. Finally, the source and destination consumer logs
+# together must contain every source record exactly once.
 source "$(dirname "$0")/lib.sh"
 step 11 "move consumers to the destination and check where they resume"
 
@@ -22,4 +23,13 @@ tail -1 "$STATE_DIR/logs/dest-consumer-a.log" | sed 's/^/  /'
 tail -1 "$STATE_DIR/logs/dest-consumer-b.log" | sed 's/^/  /'
 
 rbtool verify-cutover -group "$GROUP" -log "$STATE_DIR/consumed-dest-a.jsonl,$STATE_DIR/consumed-dest-b.jsonl" | sed 's/^/  /'
+
+# Every source record consumed exactly once across the whole migration (source consumers from
+# step 3 plus destination consumers above). ALLOW_DUPLICATES=1 reports duplicates without failing.
+info ""
+info "checking every record was consumed exactly once (source + destination) ..."
+rbtool check-duplicates \
+  -source-log "A=$STATE_DIR/consumed-source-a.jsonl,B=$STATE_DIR/consumed-source-b.jsonl" \
+  -dest-log "$STATE_DIR/consumed-dest-a.jsonl,$STATE_DIR/consumed-dest-b.jsonl" \
+  ${ALLOW_DUPLICATES:+-allow-duplicates} | sed 's/^/  /'
 next "./99-teardown.sh when done"

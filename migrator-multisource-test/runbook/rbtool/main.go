@@ -66,6 +66,8 @@ func main() {
 		err = checkOffsets(ctx, args)
 	case "verify-cutover":
 		err = verifyCutover(ctx, args)
+	case "check-duplicates":
+		err = checkDuplicates(ctx, args)
 	default:
 		usage()
 	}
@@ -76,7 +78,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: rbtool create-topics|produce|consume|check-data|check-offsets|verify-cutover [flags]")
+	fmt.Fprintln(os.Stderr, "usage: rbtool create-topics|produce|consume|check-data|check-offsets|verify-cutover|check-duplicates [flags]")
 	os.Exit(2)
 }
 
@@ -508,8 +510,134 @@ func verifyCutover(ctx context.Context, args []string) error {
 	return verdict(problems)
 }
 
-// readConsumedLog records the first and last record read per group/partition, in log order.
-func readConsumedLog(path string, first, last map[string]consumed) error {
+// ---- check-duplicates ----
+
+// check-duplicates combines what the applications consumed on the source (before the cutover) and
+// on the destination (after it) and checks that every source record, from each partition's start
+// to its end, was consumed exactly once. Destination records are mapped back to their source
+// offset through x-source-offset. Gaps always fail; duplicates fail unless -allow-duplicates.
+func checkDuplicates(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("check-duplicates", flag.ExitOnError)
+	sourceLogs := fs.String("source-log", "", "source consumer logs as NAME=path,... (e.g. A=a.jsonl,B=b.jsonl)")
+	destLogs := fs.String("dest-log", "", "comma-separated destination consumer logs")
+	allowDup := fs.Bool("allow-duplicates", false, "report duplicates without failing (at-least-once is acceptable)")
+	fs.Parse(args)
+
+	type key struct {
+		source, topic string
+		partition     int32
+	}
+	type phaseCounts struct{ src, dst map[int64]int }
+	seen := map[key]*phaseCounts{}
+	get := func(k key) *phaseCounts {
+		if seen[k] == nil {
+			seen[k] = &phaseCounts{map[int64]int{}, map[int64]int{}}
+		}
+		return seen[k]
+	}
+
+	for _, entry := range strings.Split(*sourceLogs, ",") {
+		name, path, ok := strings.Cut(entry, "=")
+		if !ok {
+			return fmt.Errorf("-source-log entry %q is not NAME=path", entry)
+		}
+		if _, err := sourceByName(name); err != nil {
+			return err
+		}
+		if err := eachConsumed(path, func(c consumed) error {
+			get(key{name, c.Topic, c.Partition}).src[c.Offset]++
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	for _, path := range strings.Split(*destLogs, ",") {
+		if err := eachConsumed(path, func(c consumed) error {
+			s, topic, ok := sourceForDestTopic(c.Topic)
+			if !ok {
+				return fmt.Errorf("%s: topic %q has no known source prefix", path, c.Topic)
+			}
+			if c.SourceOffset == nil {
+				return fmt.Errorf("%s: %s/%d@%d has no %s", path, c.Topic, c.Partition, c.Offset, offsetHeader)
+			}
+			get(key{s.name, topic, c.Partition}).dst[*c.SourceOffset]++
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+
+	var problems []string
+	fmt.Printf("%-6s %-12s %9s %9s %9s %9s %11s %11s  %s\n", "SOURCE", "PARTITION", "RECORDS", "ON SOURCE", "ON DEST", "ONCE", "DUPLICATES", "MISSING", "DETAILS")
+	for _, s := range sources {
+		adm := admin(s.addr)
+		for _, topic := range topicNames() {
+			for p := int32(0); p < topics[topic]; p++ {
+				start, err := startOffset(ctx, adm, topic, p)
+				if err != nil {
+					return err
+				}
+				end, err := endOffset(ctx, adm, topic, p)
+				if err != nil {
+					return err
+				}
+				c := get(key{s.name, topic, p})
+				var onSrc, onDst, once, dups int64
+				var dupSwitch, dupSource, dupDest, missing []int64
+				for o := start; o < end; o++ {
+					ns, nd := int64(c.src[o]), int64(c.dst[o])
+					if ns > 0 {
+						onSrc++
+					}
+					if nd > 0 {
+						onDst++
+					}
+					switch n := ns + nd; {
+					case n == 0:
+						missing = append(missing, o)
+					case n == 1:
+						once++
+					default:
+						dups += n - 1
+						switch {
+						case ns > 0 && nd > 0:
+							dupSwitch = append(dupSwitch, o) // read before and after the cutover
+						case ns > 1:
+							dupSource = append(dupSource, o)
+						default:
+							dupDest = append(dupDest, o)
+						}
+					}
+				}
+				part := fmt.Sprintf("%s%s/%d", s.prefix, topic, p)
+				var details []string
+				if len(dupSwitch) > 0 {
+					details = append(details, "re-read after cutover "+ranges(dupSwitch))
+				}
+				if len(dupSource) > 0 {
+					details = append(details, "repeated on source "+ranges(dupSource))
+				}
+				if len(dupDest) > 0 {
+					details = append(details, "repeated on destination "+ranges(dupDest))
+				}
+				if len(missing) > 0 {
+					details = append(details, "never consumed "+ranges(missing))
+					problems = append(problems, fmt.Sprintf("%s: %d records never consumed (%s)", part, len(missing), ranges(missing)))
+				}
+				if dups > 0 && !*allowDup {
+					problems = append(problems, fmt.Sprintf("%s: %d duplicate reads", part, dups))
+				}
+				if len(details) == 0 {
+					details = append(details, "every record exactly once")
+				}
+				fmt.Printf("%-6s %-12s %9d %9d %9d %9d %11d %11d  %s\n", s.name, part, end-start, onSrc, onDst, once, dups, len(missing), strings.Join(details, "; "))
+			}
+		}
+	}
+	return verdict(problems)
+}
+
+func eachConsumed(path string, fn func(consumed) error) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -521,13 +649,50 @@ func readConsumedLog(path string, first, last map[string]consumed) error {
 		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
+		if err := fn(c); err != nil {
+			return err
+		}
+	}
+	return sc.Err()
+}
+
+func sourceForDestTopic(t string) (source, string, bool) {
+	for _, s := range sources {
+		if rest, ok := strings.CutPrefix(t, s.prefix); ok {
+			return s, rest, true
+		}
+	}
+	return source{}, "", false
+}
+
+// ranges formats sorted offsets as "3-7,12".
+func ranges(offsets []int64) string {
+	var parts []string
+	for i := 0; i < len(offsets); {
+		j := i
+		for j+1 < len(offsets) && offsets[j+1] == offsets[j]+1 {
+			j++
+		}
+		if i == j {
+			parts = append(parts, fmt.Sprint(offsets[i]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", offsets[i], offsets[j]))
+		}
+		i = j + 1
+	}
+	return strings.Join(parts, ",")
+}
+
+// readConsumedLog records the first and last record read per group/partition, in log order.
+func readConsumedLog(path string, first, last map[string]consumed) error {
+	return eachConsumed(path, func(c consumed) error {
 		key := fmt.Sprintf("%s|%s/%d", c.Group, c.Topic, c.Partition)
 		if _, ok := first[key]; !ok {
 			first[key] = c
 		}
 		last[key] = c
-	}
-	return sc.Err()
+		return nil
+	})
 }
 
 // ---- helpers ----

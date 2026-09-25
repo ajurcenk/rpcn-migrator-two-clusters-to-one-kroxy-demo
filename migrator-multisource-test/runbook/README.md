@@ -16,14 +16,18 @@ Run the scripts in order from any directory, one at a time, and read each script
 | `08-stop-consumers.sh` | 8 | Stops the source consumers; each commits its final position and leaves | Both groups `Empty` |
 | `09-stop-producers.sh` | 9 | Stops the producers | Final counts |
 | `10-wait-replication-and-stop-migrators.sh` | 10 | Waits until the destination holds every source record **and** every translated position is exact, then stops the migrators | Lag 0, all partitions `exact`, `migrators stopped` |
-| `11-cutover-consumers.sh` | 11 | Consumes the destination as `a_app-group` / `b_app-group` until idle, then checks each partition | `OK: resumed exactly` everywhere, `RESULT: OK` |
+| `11-cutover-consumers.sh` | 11 | Consumes the destination as `a_app-group` / `b_app-group` until idle. Then checks each partition's resume point, and that every source record was consumed exactly once across source and destination | `OK: resumed exactly` everywhere; `every record exactly once` everywhere; both `RESULT: OK` |
 | `99-teardown.sh` | | Stops everything, deletes containers, data and `.state/` | |
 
 ## How positions are checked
 
 The migrators run with `offset_header: "x-source-offset"`, so every destination record carries the source offset it was copied from. The checks read that header instead of assuming the two sides use the same offset numbers:
 - **Steps 7 and 10:** the destination record just before a translated position gives the source offset that position corresponds to. Its value must also match the source record at that offset.
-- **Step 11:** the first record each destination consumer reads, per partition, must be the source record at the source group's final committed offset. A lower offset means re-reads; a higher one means skipped records, which fails the check.
+- **Step 11, resume point (`verify-cutover`):** the first record each destination consumer reads, per partition, must be the source record at the source group's final committed offset. A lower offset means re-reads, which are reported; a higher one means skipped records, which fails the check.
+- **Step 11, duplicates and gaps (`check-duplicates`):** the source consumers' logs (step 3 on) and the destination consumers' logs are combined, with destination records mapped to their source offset. Every source offset, from each partition's start to its end, must have been consumed **exactly once**.
+  - Duplicates are reported by where they happened: `re-read after cutover` (read on the source and again on the destination), `repeated on source`, or `repeated on destination`.
+  - Gaps show as `never consumed`.
+  - Gaps always fail. Duplicates fail too, unless you run step 11 with `ALLOW_DUPLICATES=1`, for applications where at-least-once delivery is acceptable.
 
 ## Why step 7 shows "behind" and step 10 insists on "exact"
 
