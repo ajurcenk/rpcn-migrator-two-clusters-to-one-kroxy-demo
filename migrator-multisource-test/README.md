@@ -73,3 +73,7 @@ docker run --rm -v "$PWD/migrator:/cfg:ro,z" docker.redpanda.com/redpandadata/co
 `scripts/step3-check-logs.sh` checks the migrator and proxy logs. Individual stages: `make step3-up`, `step3-seed`, `step3-migrators`, `step3-test`, `step3-down`.
 
 `migrator/Dockerfile` builds Connect from the v4.100.0 source instead. It is untested and not used; see `docs/findings.md`.
+
+## Runbook: manual migration with live traffic
+
+`runbook/` walks through a full migration as eleven independent scripts, run by hand: clusters, then producers and consumers on the sources, then proxies and migrators, checks on data and offset translation, stopping source traffic, and finally moving the consumers to the destination and checking where they resume. See [`runbook/README.md`](runbook/README.md).

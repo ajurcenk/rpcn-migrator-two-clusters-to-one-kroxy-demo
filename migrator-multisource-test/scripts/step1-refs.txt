@@ -36,3 +36,6 @@ KMSG/generated.go|12839|func (*FindCoordinatorRequest) MaxVersion() int16       
 LOCAL/tests/go.mod|*|github.com/twmb/franz-go v1.20.7
 LOCAL/tests/go.mod|*|github.com/twmb/franz-go/pkg/kadm v1.17.2
 LOCAL/tests/go.mod|*|github.com/twmb/franz-go/pkg/kmsg v1.12.0
+LOCAL/runbook/rbtool/go.mod|*|github.com/twmb/franz-go v1.20.7
+LOCAL/runbook/rbtool/go.mod|*|github.com/twmb/franz-go/pkg/kadm v1.17.2
+LOCAL/runbook/rbtool/go.mod|*|github.com/twmb/franz-go/pkg/kmsg v1.12.0
