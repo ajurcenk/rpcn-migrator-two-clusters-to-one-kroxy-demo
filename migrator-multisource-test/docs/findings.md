@@ -108,6 +108,32 @@ Wire traffic per proxy per sync cycle was exactly the Step 1 prediction: FindCoo
 
 **Source and destination offsets differ.** Before the migrators start, the seed deletes the first records of every source partition that has group commits (`DeleteRecords`: A orders/0 before 200, B orders/0 before 100, B payments/0 before 50). The migrator copies from the source's start offset, so destination offsets trail the source by exactly those amounts. The offset check therefore requires `destination = source − trimmed` as well as matching records at the position. If the offsets were identical on both sides, an untranslated offset would pass too.
 
+### Active consumers on the source (`TestStep3ActiveConsumer`, `TestStep3KnownIssueCorrectionAfterStop`)
+
+The migrator translates groups with live members differently. It uses exact `offset_header` translation only for `Empty` groups (`migrator_groups.go:444`). A `Stable` group gets **timestamp-only** translation (`translateOffset`, `:741-788`): it reads the timestamp of the source record just before the committed offset, and commits the first destination offset with that timestamp or later, plus 1 if the timestamps are equal.
+
+In each test, a real consumer joins the group on the source and stays connected, and it commits through its own group session, so the source group is `Stable` while the migrator syncs. The same group names on A and B also check the prefixes with members present: `a_live-group` and `b_live-group` stay separate.
+
+| Case | Data | Source → destination (exact) | Result |
+|---|---|---|---|
+| Distinct timestamps (`live-group`, topic `events`, records 1 ms apart) | A | 200 → **150** (150), then 250 → **200** (200) | **exact**, pass |
+| | B | 120 → **70** (70), then 180 → **130** (130) | **exact**, pass |
+| Shared timestamps (`batch-group`, bulk-produced `orders`; 400 / 320 records share one ms) | A | 450 → **1** (250) | never ahead, within the shared run 0–399: pass |
+| | B | 300 → **1** (200) | never ahead, within the run 0–319: pass |
+| After the consumer stops (`stop-group`, group goes `Empty`) | A, B | stays at **1** (250 / 200) | **fails**: known issue, `make step3-known-issues` |
+
+**Result:** for active consumers, the migrator is exact when record timestamps are distinct. With coarse timestamps (bulk loads, batched producers, fixed timestamps) it commits a position that is always behind the true one: consumers re-read records (at-least-once) but never skip any. In this data that meant about 250 records on A.
+
+### Known issues in Redpanda Connect 4.100.0 (not caused by the proxy)
+
+`make step3-known-issues` runs `TestStep3KnownIssueCorrectionAfterStop`, which is **expected to fail**. It's kept out of `make step3`. It states the requirement that once a source group's consumers stop, the destination offset is corrected to the exact one. Investigating it turned up three migrator behaviors:
+
+1. **Offsets already translated aren't re-translated.** The migrator skips a group/partition whose source offset hasn't changed since it last synced it (`migrator_groups.go:378`, "already synced - skipping"). When consumers stop without committing again, the source offset stays the same, so the switch to `Empty` never triggers the exact path. The imprecise timestamp result stays for good. **Confirmed:** one more commit on source A (450 → 451) immediately gave the exact destination **251**.
+2. **After a restart, group sync does nothing until the migrator writes a record or `sync_topic_interval` (default 5m) passes.** The migrator's known topics start out empty. The first topic sync runs only on the first written batch (`migrator.go:624`, `SyncOnce`) or on the first periodic tick (`migrator_topic.go:176`). Group sync only covers known topics, so a restarted migrator on an idle source syncs no groups for up to 5 minutes. **Confirmed:** a restarted migrator-b stayed idle until one record was produced.
+3. **After a restart, exact translation fails for destination topics the migrator hasn't written to since the restart.** `readRecordAtOffset` finds the partition leader through kgo's `PartitionLeader` (`kgo/metadata.go:45-68`), which only reads the client's local metadata (topics it has produced to or consumes) and never fetches any itself. The migrator logs `WARN … exact offset translation: read record at offset: partition leader unknown for topic b_orders partition 0`, falls back to the timestamp result, and commits nothing better. This also hit `app-group` after the restart. It comes from how the migrator uses franz-go, so it should happen without the proxy too; **that hasn't been verified without the proxy.**
+
+**Operational consequence:** with active source consumers and coarse timestamps, the final destination position becomes exact only if the source group **commits again after its consumers stop**, while the migrator (1) is still running, and (2) has written to that topic since it last started. Stopping the consumers alone isn't enough, and restarting the migrator doesn't help on an idle source.
+
 ### Negative control (no proxies): observed
 
 - **Plain run:** both migrators write into **one shared destination group `app-group`**, holding `a_orders/0=300`, `b_orders/0=150` and `b_payments/0=50`, all correctly translated. **There are no errors in either migrator's log.** This matches the Step 1 prediction: the two sources don't overwrite each other's partitions, because the topic names already differ, but the groups can't be told apart.
@@ -141,6 +167,8 @@ Wire traffic per proxy per sync cycle was exactly the Step 1 prediction: FindCoo
 
 ### Open questions
 
-1. **Timestamp-only offset translation.** Run Step 3 without `offset_header` and measure how far offsets deviate from the source positions.
+1. **Timestamp-only offset translation for `Empty` groups** (without `offset_header`). Timestamp-only translation for *active* groups is now measured (see above). Removing `offset_header` would show the same behavior for `Empty` groups; not run.
 2. **`EntityIsolation` with SASL.** Worth a spike: principals `migrator-a`/`migrator-b`, then confirm FindCoordinator v4 and OffsetFetch v8 stripping works for franz-go the same way as with the custom filter.
-3. **Cutover procedure:** the order for stopping group sync and starting destination consumers, given the `UNKNOWN_MEMBER_ID` behavior.
+3. **Cutover procedure:** the order for stopping source consumers, forcing a final source commit (known issue 1), stopping group sync, and starting destination consumers (`UNKNOWN_MEMBER_ID`).
+4. **Known issue 3 without the proxy:** confirm it with migrators pointed straight at the destination.
+5. **Report known issues 1–3 upstream** (Redpanda Connect) once confirmed.

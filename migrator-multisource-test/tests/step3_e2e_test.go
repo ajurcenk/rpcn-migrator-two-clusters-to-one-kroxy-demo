@@ -7,6 +7,8 @@
 //	TestStep3Seed            before the migrators start
 //	TestStep3Replicated      migrators via proxies: topics, records, groups, offsets, schemas
 //	TestStep3LiveSync        migrators via proxies: later changes propagate to the right side only
+//	TestStep3ActiveConsumer  migrators via proxies: groups with live members (timestamp translation)
+//	TestStep3KnownIssue...   expected to fail with Connect 4.100.0; `make step3-known-issues` only
 //	TestStep3NegativeControl migrators straight to redpanda-dest (no proxies)
 package migratortest
 
@@ -18,11 +20,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 type source struct {
@@ -45,20 +50,22 @@ var (
 		{
 			name: "A", prefix: "a_",
 			addr: env("SRC_A_ADDR", "localhost:19092"), schemaReg: env("SRC_A_SR", "http://localhost:18081"),
-			counts:       map[string]int{"orders": 1000, "payments": 200},
+			counts:       map[string]int{"orders": 1000, "payments": 200, "events": 300},
 			groupOffsets: map[string]map[int32]int64{"orders": {0: 500}},
-			trimBefore:   map[string]map[int32]int64{"orders": {0: 200}},
+			trimBefore:   map[string]map[int32]int64{"orders": {0: 200}, "events": {0: 50}},
 		},
 		{
 			name: "B", prefix: "b_",
 			addr: env("SRC_B_ADDR", "localhost:29092"), schemaReg: env("SRC_B_SR", "http://localhost:28081"),
-			counts:       map[string]int{"orders": 700, "payments": 300},
+			counts:       map[string]int{"orders": 700, "payments": 300, "events": 300},
 			groupOffsets: map[string]map[int32]int64{"orders": {0: 250}, "payments": {0: 100}},
-			trimBefore:   map[string]map[int32]int64{"orders": {0: 100}, "payments": {0: 50}},
+			trimBefore:   map[string]map[int32]int64{"orders": {0: 100}, "payments": {0: 50}, "events": {0: 50}},
 		},
 	}
 
-	partitions = map[string]int32{"orders": 3, "payments": 1}
+	// orders and payments are produced in bulk, so many records share a millisecond timestamp.
+	// events records are 1 ms apart, as with a steady real-world producer.
+	partitions = map[string]int32{"orders": 3, "payments": 1, "events": 1}
 )
 
 const (
@@ -97,8 +104,12 @@ func TestStep3Seed(t *testing.T) {
 
 			for topic, count := range src.counts {
 				rs := make([]*kgo.Record, count)
+				base := time.Now().Add(-time.Duration(count) * time.Millisecond)
 				for n := range rs {
 					rs[n] = &kgo.Record{Topic: topic, Partition: partitionFor(topic, n), Value: fmt.Appendf(nil, "%s-%s-%d", src.name, topic, n)}
+					if topic == "events" {
+						rs[n].Timestamp = base.Add(time.Duration(n) * time.Millisecond)
+					}
 				}
 				if err := cl.ProduceSync(ctx, rs...).FirstErr(); err != nil {
 					t.Fatalf("produce %s: %v", topic, err)
@@ -370,6 +381,239 @@ func TestStep3NegativeControl(t *testing.T) {
 		after := committedOffset(t, ctx, dest, appGroup, "a_orders", 0)
 		t.Logf("OBSERVED with Stable destination group: source A moved app-group orders/0 to %d; destination app-group a_orders/0 %d -> %d", newAt, before, after)
 	})
+}
+
+// TestStep3ActiveConsumer checks translation for source groups that have live members. The
+// migrator only uses exact (offset_header) translation for Empty groups (migrator_groups.go:444);
+// a Stable group gets timestamp-only translation (translateOffset). Both sources run members of
+// groups with the same names, which also checks the prefixes keep them apart while members exist.
+func TestStep3ActiveConsumer(t *testing.T) {
+	// Several sync cycles per source and case; longer than testCtx's default.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	t.Cleanup(cancel)
+	_, dest := newClient(t, destAddr)
+
+	// Case 1: records 1 ms apart. Timestamp translation should be exact.
+	t.Run("distinct timestamps", func(t *testing.T) {
+		positions := map[string][]int64{"A": {200, 250}, "B": {120, 180}}
+		for _, src := range sources {
+			t.Run(src.name, func(t *testing.T) {
+				srcCl, srcAdm := newClient(t, src.addr)
+				member, _ := startMember(t, ctx, src.addr, srcAdm, "live-group", "events")
+				dg, dt, shift := src.prefix+"live-group", src.prefix+"events", src.shift("events", 0)
+				prev := int64(-1)
+				for _, at := range positions[src.name] {
+					commitAsMember(t, ctx, member, "events", 0, at)
+					got := waitForChange(t, ctx, dest, dg, dt, 0, prev)
+					prev = got
+					requireStable(t, ctx, srcAdm, "live-group")
+					t.Logf("Stable source live-group events/0=%d -> %s %s/0=%d (exact %d)", at, dg, dt, got, at-shift)
+					if got != at-shift {
+						explainTimestampTranslation(t, ctx, srcCl, "events", dt, 0, at, got)
+						t.Fatalf("%s %s/0 = %d, want %d (source %d minus %d trimmed)", dg, dt, got, at-shift, at, shift)
+					}
+					assertSamePosition(t, ctx, srcCl, destAddr, "events", dt, 0, at, got)
+				}
+			})
+		}
+	})
+
+	// Case 2: bulk-produced records sharing a timestamp. Translation can't be exact while the
+	// group is Stable; it must never be ahead (that would skip records) and must land in the run
+	// of records sharing the timestamp. What happens after the consumer stops is covered by
+	// TestStep3KnownIssueCorrectionAfterStop.
+	t.Run("shared timestamps", func(t *testing.T) {
+		for _, src := range sources {
+			t.Run(src.name, func(t *testing.T) {
+				_, _, _ = sharedTimestampStable(t, ctx, dest, src, "batch-group")
+			})
+		}
+	})
+
+	if groups := listGroupNames(t, ctx, dest); groups["live-group"] || groups["batch-group"] {
+		t.Fatalf("destination has unprefixed live-group or batch-group: %v", keys(groups))
+	}
+}
+
+// TestStep3KnownIssueCorrectionAfterStop is EXPECTED TO FAIL with Redpanda Connect 4.100.0 and
+// runs only via `make step3-known-issues`, not `make step3`. It states the requirement that once
+// a source group's consumers stop (the group goes Empty), the migrator corrects the imprecise
+// timestamp-based destination offset to the exact one. It doesn't: the migrator skips source
+// offsets it has already translated (migrator_groups.go:378), so without another commit on the
+// source the offset is never re-translated. See docs/findings.md.
+func TestStep3KnownIssueCorrectionAfterStop(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	t.Cleanup(cancel)
+	_, dest := newClient(t, destAddr)
+	for _, src := range sources {
+		t.Run(src.name, func(t *testing.T) {
+			srcCl, srcAdm := newClient(t, src.addr)
+			stop, at, exact := sharedTimestampStable(t, ctx, dest, src, "stop-group")
+			dg, dt := src.prefix+"stop-group", src.prefix+"orders"
+
+			stop()
+			waitFor(t, time.Minute, func() error {
+				if st := groupState(t, ctx, srcAdm, "stop-group"); st != "Empty" {
+					return fmt.Errorf("source stop-group is %q", st)
+				}
+				return nil
+			})
+			var final int64
+			waitFor(t, 4*syncInterval, func() error {
+				if final = committedOffset(t, ctx, dest, dg, dt, 0); final != exact {
+					return fmt.Errorf("%s %s/0 = %d after the consumer stopped, want exact %d", dg, dt, final, exact)
+				}
+				return nil
+			})
+			assertSamePosition(t, ctx, srcCl, destAddr, "orders", dt, 0, at, final)
+		})
+	}
+}
+
+// sharedTimestampStable runs a Stable member of group on the source's bulk-produced orders
+// topic, commits orders/0 through it, and checks the translated destination offset is never
+// ahead of the exact one and lies within the run of records sharing the looked-up timestamp.
+// It returns the member's stop function, the source offset and the exact destination offset.
+func sharedTimestampStable(t *testing.T, ctx context.Context, dest *kadm.Client, src source, group string) (stop func(), at, exact int64) {
+	t.Helper()
+	positions := map[string]int64{"A": 450, "B": 300}
+	srcCl, srcAdm := newClient(t, src.addr)
+	member, stop := startMember(t, ctx, src.addr, srcAdm, group, "orders")
+	dg, dt, at := src.prefix+group, src.prefix+"orders", positions[src.name]
+	exact = at - src.shift("orders", 0)
+
+	commitAsMember(t, ctx, member, "orders", 0, at)
+	got := waitForChange(t, ctx, dest, dg, dt, 0, -1)
+	requireStable(t, ctx, srcAdm, group)
+	first, last := sharedTimestampRun(t, ctx, srcCl, "orders", dt, 0, at)
+	t.Logf("Stable source %s orders/0=%d -> %s %s/0=%d (exact %d; records sharing the timestamp: %d-%d)", group, at, dg, dt, got, exact, first, last)
+	if got > exact {
+		t.Fatalf("%s %s/0 = %d is ahead of the exact position %d: a consumer would skip records", dg, dt, got, exact)
+	}
+	if got < first || got > last+1 {
+		t.Fatalf("%s %s/0 = %d is outside the shared-timestamp run %d-%d", dg, dt, got, first, last)
+	}
+	return stop, at, exact
+}
+
+func waitForChange(t *testing.T, ctx context.Context, dest *kadm.Client, group, topic string, p int32, prev int64) int64 {
+	t.Helper()
+	var got int64
+	waitFor(t, 2*time.Minute, func() error {
+		if got = committedOffset(t, ctx, dest, group, topic, p); got == prev {
+			return fmt.Errorf("%s %s/%d still at %d", group, topic, p, got)
+		}
+		return nil
+	})
+	return got
+}
+
+func requireStable(t *testing.T, ctx context.Context, adm *kadm.Client, group string) {
+	t.Helper()
+	if st := groupState(t, ctx, adm, group); st != "Stable" {
+		t.Fatalf("source %s is %q, not Stable: the migrator may have seen an Empty group", group, st)
+	}
+}
+
+// startMember joins group on the source with a real consumer that keeps polling (without
+// committing on its own), and waits for the group to become Stable. stop closes the consumer,
+// which leaves the group; it also runs at test cleanup.
+func startMember(t *testing.T, ctx context.Context, addr string, adm *kadm.Client, group, topic string) (*kgo.Client, func()) {
+	t.Helper()
+	member, err := kgo.NewClient(kgo.SeedBrokers(addr), kgo.ConsumerGroup(group), kgo.ConsumeTopics(topic), kgo.DisableAutoCommit())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pollCtx, cancel := context.WithCancel(ctx)
+	polled := make(chan struct{})
+	go func() {
+		defer close(polled)
+		for pollCtx.Err() == nil {
+			member.PollFetches(pollCtx)
+		}
+	}()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			<-polled
+			member.Close()
+		})
+	}
+	t.Cleanup(stop)
+	waitFor(t, time.Minute, func() error {
+		if st := groupState(t, ctx, adm, group); st != "Stable" {
+			return fmt.Errorf("%s is %q", group, st)
+		}
+		return nil
+	})
+	return member, stop
+}
+
+// commitAsMember commits through the member's own group session (its generation), as a real
+// application does, so the group stays Stable.
+func commitAsMember(t *testing.T, ctx context.Context, member *kgo.Client, topic string, p int32, at int64) {
+	t.Helper()
+	var commitErr error
+	member.CommitOffsetsSync(ctx, map[string]map[int32]kgo.EpochOffset{topic: {p: {Epoch: -1, Offset: at}}},
+		func(_ *kgo.Client, _ *kmsg.OffsetCommitRequest, resp *kmsg.OffsetCommitResponse, err error) {
+			if err != nil {
+				commitErr = err
+				return
+			}
+			for _, rt := range resp.Topics {
+				for _, rp := range rt.Partitions {
+					if e := kerr.ErrorForCode(rp.ErrorCode); e != nil {
+						commitErr = e
+					}
+				}
+			}
+		})
+	if commitErr != nil {
+		t.Fatalf("member commit %s/%d=%d: %v", topic, p, at, commitErr)
+	}
+}
+
+func groupState(t *testing.T, ctx context.Context, adm *kadm.Client, group string) string {
+	t.Helper()
+	dg, err := adm.DescribeGroups(ctx, group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dg[group].State
+}
+
+// sharedTimestampRun returns the destination offsets whose records share the timestamp of the
+// source record just before srcAt (the timestamp translateOffset looks up).
+func sharedTimestampRun(t *testing.T, ctx context.Context, srcCl *kgo.Client, srcTopic, dstTopic string, p int32, srcAt int64) (first, last int64) {
+	t.Helper()
+	destCl, _ := newClient(t, destAddr)
+	src := readAll(t, ctx, srcCl, srcTopic)
+	dst := readAll(t, ctx, destCl, dstTopic)
+	prev, ok := src[tp{p, srcAt - 1}]
+	if !ok {
+		t.Fatalf("source %s/%d has no record at %d", srcTopic, p, srcAt-1)
+	}
+	first, last = -1, -1
+	for k, r := range dst {
+		if k.partition == p && r.Timestamp.Equal(prev.Timestamp) {
+			if first < 0 || k.offset < first {
+				first = k.offset
+			}
+			if k.offset > last {
+				last = k.offset
+			}
+		}
+	}
+	return first, last
+}
+
+// explainTimestampTranslation logs what timestamp translation had to work with.
+func explainTimestampTranslation(t *testing.T, ctx context.Context, srcCl *kgo.Client, srcTopic, dstTopic string, p int32, srcAt, dstAt int64) {
+	t.Helper()
+	first, last := sharedTimestampRun(t, ctx, srcCl, srcTopic, dstTopic, p, srcAt)
+	t.Logf("timestamp translation: destination records sharing the timestamp of source %s/%d@%d: offsets %d-%d; migrator chose %d",
+		srcTopic, p, srcAt-1, first, last, dstAt)
 }
 
 // ---- helpers ----

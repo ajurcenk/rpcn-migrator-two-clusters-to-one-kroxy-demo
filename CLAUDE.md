@@ -14,6 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `make filter-test` | Filter unit tests (Maven in `maven:3.9-eclipse-temurin-21`, `~/.m2` mounted; no local Maven) |
 | `make step2` | Unit tests + proxy integration test on a fresh stack, then tear down |
 | `make step3` / `make step3-negative` | End-to-end run with / without proxies, then tear down |
+| `make step3-known-issues` | Migrator requirements Connect 4.100.0 doesn't meet. **Expected to fail**; keep it out of `make step3` |
 | `make step2-up` / `step2-test` / `step2-down` | Iterate on a running Step 2 stack (same pattern for `step3-*`) |
 
 Run a single test:
@@ -63,4 +64,9 @@ Read `kroxy-linking-demo` end to end before writing filter code. It is the sourc
   - OffsetFetch v1 returns no offsets.
   - Deleting an Empty group's last offset deletes the group.
   - Commits to a `Stable` destination group fail with `UNKNOWN_MEMBER_ID`.
+- **Migrator behaviors already found**, detailed in `findings.md` under "Known issues":
+  - Active source groups get timestamp-only translation, which is always behind with bulk-produced data.
+  - A translated source offset is never re-translated until it changes.
+  - After a restart, group sync is idle until the migrator writes a record (or 5 minutes pass), and exact translation fails for topics it hasn't written to.
+- **Makefile recipes:** `GOTEST3` starts with `cd tests &&`, so call test targets through `$(MAKE)`. Inlining it makes the following teardown run in the wrong directory.
 - **Proxy DEBUG log lines** look like `api=OFFSET_FETCH version=8 request group 'x' -> 'a_x'`. The logger name prints abbreviated as `de.cg.ConsumerGroupPrefixFilter`, so grep for that, not `demo.cgprefix`.

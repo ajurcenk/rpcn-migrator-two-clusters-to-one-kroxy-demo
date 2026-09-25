@@ -50,6 +50,7 @@ Rewrite logging is controlled with `CG_PREFIX_LOG_LEVEL` on the proxy container 
 ```sh
 make step3            # brokers + proxies -> seed -> migrators -> assertions + log checks -> tear down
 make step3-negative   # same, but both migrators write straight to redpanda-dest (no proxies)
+make step3-known-issues  # requirements the migrator doesn't meet yet; EXPECTED TO FAIL (see docs/findings.md)
 ```
 
 `compose/docker-compose.step3.yaml` runs:
@@ -63,10 +64,11 @@ The migrators use the published image `docker.redpanda.com/redpandadata/connect:
 docker run --rm -v "$PWD/migrator:/cfg:ro,z" docker.redpanda.com/redpandadata/connect:4.100.0 lint /cfg/migrator-a.yaml
 ```
 
-`tests/step3_e2e_test.go` (build tag `step3`) has four tests:
+`tests/step3_e2e_test.go` (build tag `step3`):
 - `TestStep3Seed` seeds both sources before the migrators start.
-- `TestStep3Replicated` and `TestStep3LiveSync` assert against the brokers directly, bypassing the proxies.
+- `TestStep3Replicated`, `TestStep3LiveSync` and `TestStep3ActiveConsumer` (groups with live members on the source) assert against the brokers directly, bypassing the proxies.
 - `TestStep3NegativeControl` records the collision.
+- `TestStep3KnownIssueCorrectionAfterStop` states a requirement Connect 4.100.0 doesn't meet. It is **expected to fail** and runs only via `make step3-known-issues`.
 
 `scripts/step3-check-logs.sh` checks the migrator and proxy logs. Individual stages: `make step3-up`, `step3-seed`, `step3-migrators`, `step3-test`, `step3-down`.
 
