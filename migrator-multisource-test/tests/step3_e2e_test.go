@@ -30,6 +30,11 @@ type source struct {
 	addr, schemaReg string
 	counts          map[string]int              // records per topic
 	groupOffsets    map[string]map[int32]int64 // app-group commits on the source
+	// trimBefore deletes the first records of a partition during seeding (DeleteRecords), so the
+	// migrator starts copying from a later source offset and destination offsets end up lower
+	// than source offsets by exactly that amount. Without it, both sides have identical offsets
+	// and an untranslated offset would pass the checks just as well.
+	trimBefore map[string]map[int32]int64
 }
 
 var (
@@ -42,12 +47,14 @@ var (
 			addr: env("SRC_A_ADDR", "localhost:19092"), schemaReg: env("SRC_A_SR", "http://localhost:18081"),
 			counts:       map[string]int{"orders": 1000, "payments": 200},
 			groupOffsets: map[string]map[int32]int64{"orders": {0: 500}},
+			trimBefore:   map[string]map[int32]int64{"orders": {0: 200}},
 		},
 		{
 			name: "B", prefix: "b_",
 			addr: env("SRC_B_ADDR", "localhost:29092"), schemaReg: env("SRC_B_SR", "http://localhost:28081"),
 			counts:       map[string]int{"orders": 700, "payments": 300},
 			groupOffsets: map[string]map[int32]int64{"orders": {0: 250}, "payments": {0: 100}},
+			trimBefore:   map[string]map[int32]int64{"orders": {0: 100}, "payments": {0: 50}},
 		},
 	}
 
@@ -98,6 +105,27 @@ func TestStep3Seed(t *testing.T) {
 				}
 			}
 
+			var trim kadm.Offsets
+			for topic, ps := range src.trimBefore {
+				for p, before := range ps {
+					trim.Add(kadm.Offset{Topic: topic, Partition: p, At: before})
+				}
+			}
+			resp, err := adm.DeleteRecords(ctx, trim)
+			if err == nil {
+				err = resp.Error()
+			}
+			if err != nil {
+				t.Fatalf("delete records %v: %v", trim, err)
+			}
+			for topic, ps := range src.trimBefore {
+				for p, before := range ps {
+					if got := startOffset(t, ctx, adm, topic, p); got != before {
+						t.Fatalf("%s/%d start offset %d after DeleteRecords, want %d", topic, p, got, before)
+					}
+				}
+			}
+
 			// A plain admin commit leaves app-group Empty, as a stopped consumer would.
 			for topic, ps := range src.groupOffsets {
 				for p, at := range ps {
@@ -128,7 +156,7 @@ func TestStep3Replicated(t *testing.T) {
 			for topic := range partitions {
 				dt := src.prefix + topic
 				waitFor(t, 2*time.Minute, func() error {
-					if got, want := totalEnd(t, ctx, dest, dt), totalEnd(t, ctx, srcAdm, topic); got != want {
+					if got, want := recordCount(t, ctx, dest, dt), recordCount(t, ctx, srcAdm, topic); got != want {
 						return fmt.Errorf("%s has %d records, want %d", dt, got, want)
 					}
 					return nil
@@ -142,20 +170,22 @@ func TestStep3Replicated(t *testing.T) {
 					t.Fatalf("%s has %d partitions, want %d", dt, got, partitions[topic])
 				}
 
-				// Same partition, same offset, same value, and the provenance header of this source.
+				// Same partition, same order, same value, and the provenance header of this source. The
+				// destination offset is the source offset minus the records trimmed before seeding.
 				srcRecs := readAll(t, ctx, srcCl, topic)
 				destCl, _ := newClient(t, destAddr)
 				destRecs := readAll(t, ctx, destCl, dt)
-				for tp, r := range srcRecs {
-					d, ok := destRecs[tp]
+				for at, r := range srcRecs {
+					want := tp{at.partition, at.offset - src.shift(topic, at.partition)}
+					d, ok := destRecs[want]
 					if !ok {
-						t.Fatalf("%s: record %v missing", dt, tp)
+						t.Fatalf("%s: source record %v expected at destination %v, missing", dt, at, want)
 					}
 					if !bytes.Equal(d.Value, r.Value) || !strings.HasPrefix(string(d.Value), src.name+"-") {
-						t.Fatalf("%s %v: value %q, want %q", dt, tp, d.Value, r.Value)
+						t.Fatalf("%s %v: value %q, want %q (source %v)", dt, want, d.Value, r.Value, at)
 					}
 					if h := header(d, provenance); h != srcClusterID {
-						t.Fatalf("%s %v: %s=%q, want source cluster %q", dt, tp, provenance, h, srcClusterID)
+						t.Fatalf("%s %v: %s=%q, want source cluster %q", dt, want, provenance, h, srcClusterID)
 					}
 				}
 				if len(destRecs) != len(srcRecs) {
@@ -176,6 +206,10 @@ func TestStep3Replicated(t *testing.T) {
 						return nil
 					})
 					assertSamePosition(t, ctx, srcCl, destAddr, topic, dt, p, at, got)
+					// With a trimmed source partition, an untranslated offset would be wrong.
+					if shift := src.shift(topic, p); got != at-shift || (shift > 0 && got == at) {
+						t.Fatalf("%s %s/%d: destination offset %d, want %d (source %d minus %d trimmed)", dg, dt, p, got, at-shift, at, shift)
+					}
 				}
 			}
 		})
@@ -232,12 +266,13 @@ func TestStep3LiveSync(t *testing.T) {
 	produceLive(t, ctx, aCl, a.name, "orders", 0, extra)
 	produceLive(t, ctx, bCl, b.name, "payments", 0, extra)
 	aEnd := endOffset(t, ctx, aAdm, "orders", 0)
+	aShift := a.shift("orders", 0)
 	newAt := aEnd - extra/2
 	commit(t, ctx, aAdm, appGroup, "orders", 0, newAt)
 	start := time.Now()
 
 	waitFor(t, 2*time.Minute, func() error {
-		if got, want := endOffset(t, ctx, dest, "a_orders", 0), aEnd; got != want {
+		if got, want := endOffset(t, ctx, dest, "a_orders", 0), aEnd-aShift; got != want {
 			return fmt.Errorf("a_orders/0 end %d, want %d", got, want)
 		}
 		if got := committedOffset(t, ctx, dest, "a_app-group", "a_orders", 0); got == aBefore {
@@ -248,6 +283,9 @@ func TestStep3LiveSync(t *testing.T) {
 	got := committedOffset(t, ctx, dest, "a_app-group", "a_orders", 0)
 	t.Logf("a_app-group a_orders/0: %d -> %d after %s (source moved to %d)", aBefore, got, time.Since(start).Round(time.Second), newAt)
 	assertSamePosition(t, ctx, aCl, destAddr, "orders", "a_orders", 0, newAt, got)
+	if got != newAt-aShift {
+		t.Fatalf("a_app-group a_orders/0 = %d, want %d (source %d minus %d trimmed)", got, newAt-aShift, newAt, aShift)
+	}
 
 	// New B records arrive under b_, and B's group is untouched by A's move.
 	waitFor(t, time.Minute, func() error {
@@ -409,6 +447,40 @@ func groupOffsets(t *testing.T, ctx context.Context, adm *kadm.Client, group str
 	out := map[string]int64{}
 	os.Each(func(o kadm.OffsetResponse) { out[fmt.Sprintf("%s/%d", o.Topic, o.Partition)] = o.At })
 	return out
+}
+
+// shift is how far destination offsets trail source offsets for topic/p.
+func (s source) shift(topic string, p int32) int64 {
+	return s.trimBefore[topic][p]
+}
+
+// recordCount is the number of records currently in topic (end minus start, summed over partitions).
+func recordCount(t *testing.T, ctx context.Context, adm *kadm.Client, topic string) int64 {
+	t.Helper()
+	starts, err := adm.ListStartOffsets(ctx, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := totalEnd(t, ctx, adm, topic)
+	starts.Each(func(o kadm.ListedOffset) {
+		if o.Err == nil && o.Offset > 0 {
+			n -= o.Offset
+		}
+	})
+	return n
+}
+
+func startOffset(t *testing.T, ctx context.Context, adm *kadm.Client, topic string, p int32) int64 {
+	t.Helper()
+	starts, err := adm.ListStartOffsets(ctx, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, ok := starts.Lookup(topic, p)
+	if !ok || o.Err != nil {
+		return -1
+	}
+	return o.Offset
 }
 
 func totalEnd(t *testing.T, ctx context.Context, adm *kadm.Client, topic string) int64 {
