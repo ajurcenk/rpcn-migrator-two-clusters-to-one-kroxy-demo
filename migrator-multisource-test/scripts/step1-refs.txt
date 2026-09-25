@@ -1,0 +1,34 @@
+# <path relative to prefix>|<line>|<substring expected on that line>
+# Prefixes: MIG= migrator pkg, KAFKA= connect kafka pkg, KGO= franz-go kgo, KADM= kadm, KMSG= kmsg, CONNECT= connect module root
+CONNECT/go.mod|*|github.com/twmb/franz-go v1.20.7
+CONNECT/go.mod|*|github.com/twmb/franz-go/pkg/kadm v1.17.2
+CONNECT/go.mod|*|github.com/twmb/franz-go/pkg/kmsg v1.12.0
+MIG/migrator_groups.go|245|adm.ListGroups(ctx)
+MIG/migrator_groups.go|273|m.srcAdm.FetchManyOffsets(ctx, groups...)
+MIG/migrator_groups.go|365|g == m.conf.SkipSourceGroup
+MIG/migrator_groups.go|516|m.dstAdm.FetchManyOffsets(ctx, extractGroupNames(gcos)...)
+MIG/migrator_groups.go|532|dstOffsets[g].Fetched.Lookup(t, p)
+MIG/migrator_groups.go|577|m.dstAdm.CommitOffsets(ctx, g, offsets)
+MIG/migrator_groups.go|579|failed to update offsets for group
+MIG/migrator_groups.go|597|failed to update offset for group
+MIG/migrator.go|547|dstAdm := kadm.NewClient(clientInfo.Client)
+MIG/migrator.go|560|m.groups.setDestination(clientInfo.Client, dstAdm, m.offsetHeader)
+MIG/migrator_topic.go|564|b := kadm.NewACLs().
+KAFKA/franz_reader_ordered.go|510|kgo.ConsumerGroup(f.consumerGroup)
+KADM/groups.go|810|func (cl *Client) CommitOffsets(
+KADM/groups.go|1100|func (cl *Client) FetchManyOffsets(
+KADM/groups.go|1148|fetched[g.Group] = fg
+KGO/client.go|1898|coordinator was not returned in broker response
+KGO/client.go|1912|req := kmsg.NewPtrFindCoordinatorRequest()
+KGO/client.go|1944|c, ok := key2load[rc.Key]
+KGO/client.go|2161|case *kmsg.OffsetCommitRequest:
+KGO/client.go|3161|g.Group = req.Group
+KGO/client.go|3264|pin:    &pinReq{pinMax: true, max: 7}
+KGO/client.go|3278|pin:    &pinReq{pinMin: true, min: 8}
+KGO/client.go|3397|pin: &pinReq{pinMin: true, min: 4}
+KGO/client.go|3409|pin: &pinReq{pinMax: true, max: 3}
+KGO/client.go|3424|rc.Key = req.CoordinatorKey
+KGO/consumer_group_848.go|21|opt_in_kafka_next_gen_balancer_beta
+KMSG/generated.go|10967|func (*OffsetCommitRequest) MaxVersion() int16            { return 9 }
+KMSG/generated.go|11707|func (*OffsetFetchRequest) MaxVersion() int16            { return 9 }
+KMSG/generated.go|12839|func (*FindCoordinatorRequest) MaxVersion() int16          { return 6 }
