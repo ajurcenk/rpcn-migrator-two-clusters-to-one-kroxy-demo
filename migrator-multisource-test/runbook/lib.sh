@@ -23,9 +23,10 @@ info() { printf '  %s\n' "$*"; }
 fail() { printf '\nFAILED: %s\n' "$*" >&2; exit 1; }
 next() { printf '\nNext: %s\n' "$*"; }
 
-# Builds rbtool (producers, consumers, checks) when missing or older than its source.
+# Builds rbtool (producers, consumers, checks) when missing or older than its source, or always
+# with FORCE=1.
 ensure_rbtool() {
-  if [[ ! -x "$RBTOOL" || -n "$(find "$RUNBOOK_DIR/rbtool" -newer "$RBTOOL" -name '*.go' -o -newer "$RBTOOL" -name go.mod)" ]]; then
+  if [[ -n "${FORCE:-}" || ! -x "$RBTOOL" || -n "$(find "$RUNBOOK_DIR/rbtool" -newer "$RBTOOL" -name '*.go' -o -newer "$RBTOOL" -name go.mod)" ]]; then
     info "building rbtool ..."
     (cd "$RUNBOOK_DIR/rbtool" && go build -o "$RBTOOL" .)
   fi

@@ -4,8 +4,16 @@ This is a manual walk-through of a full migration with live traffic. Sources A a
 
 Run the scripts in order from any directory, one at a time, and read each script's output before moving on. Every script is independent: it checks its preconditions and says what to run next.
 
+**Prerequisites:** Docker with Compose v2, Go 1.26+, and network access to pull images the first time. No local Maven or JDK is needed; the proxy filter is compiled inside its Docker build.
+
+Start with `00-setup.sh`. It's safe to re-run, and it only builds or pulls what's missing or out of date:
+- `FORCE=1 ./00-setup.sh` re-pulls and rebuilds everything.
+- `FILTER_TESTS=1 ./00-setup.sh` also runs the filter's 58 unit tests before building the proxy image.
+- Setup rebuilds the proxy image whenever a file in `../kroxylicious-filter/` is newer than the image.
+
 | Script | Step | What it does | What to look for |
 |---|---|---|---|
+| `00-setup.sh` | 0 | Checks prerequisites. Pulls images, builds the proxy image and rbtool (only what's missing or out of date), lints the migrator configs, and warns about busy ports or a running stack | `Setup complete.` |
 | `01-start-clusters.sh` | 1 | Starts `redpanda-a`, `redpanda-b`, `redpanda-dest` | Addresses printed |
 | `02-start-producers.sh` | 2 | Creates `orders` (3 partitions) and `payments` (1) on both sources; starts a producer per source (`RATE` records/s per topic, default 20) | `started producer-a/b` |
 | `03-start-consumers.sh` | 3 | Starts an `app-group` consumer per source (auto-commit) | Both groups `Stable`, offsets moving |
