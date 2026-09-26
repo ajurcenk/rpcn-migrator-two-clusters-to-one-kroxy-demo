@@ -2,6 +2,76 @@
 
 This is a manual walk-through of a full migration with live traffic. Sources A and B each have producers and an application consumer group `app-group`. One migrator per source replicates into a shared destination, through its own Kroxylicious proxy, so the groups arrive as `a_app-group` and `b_app-group`. At the end, the consumers move to the destination and resume where they stopped.
 
+## Solution
+
+```mermaid
+flowchart LR
+  subgraph SRC_A["«cluster» Source A · redpanda-a"]
+    direction TB
+    A_T["topics<br/>orders · payments"]
+    A_G["consumer groups<br/>app-group · migrator"]
+    A_SR[("Schema Registry<br/>orders-value")]
+  end
+  subgraph SRC_B["«cluster» Source B · redpanda-b"]
+    direction TB
+    B_T["topics<br/>orders · payments"]
+    B_G["consumer groups<br/>app-group · migrator"]
+    B_SR[("Schema Registry<br/>orders-value")]
+  end
+
+  PA(["producer A (step 2)"]) -->|"produce"| A_T
+  CA(["app consumer A (step 3)<br/>group app-group"]) -->|"consume + commit"| A_T
+  PB(["producer B (step 2)"]) -->|"produce"| B_T
+  CB(["app consumer B (step 3)<br/>group app-group"]) -->|"consume + commit"| B_T
+
+  subgraph MIG["«component» Redpanda Connect 4.100.0 · redpanda_migrator"]
+    direction TB
+    MA["migrator-a (step 5)<br/>topics → a_&lt;topic&gt;<br/>subjects → a_&lt;subject&gt;<br/>headers: x-source-offset,<br/>x-source-cluster"]
+    MB["migrator-b (step 5)<br/>topics → b_&lt;topic&gt;<br/>subjects → b_&lt;subject&gt;<br/>headers: x-source-offset,<br/>x-source-cluster"]
+  end
+
+  A_T -->|"records (input group migrator)"| MA
+  A_G -->|"app-group offsets"| MA
+  A_SR -->|"schemas"| MA
+  B_T -->|"records (input group migrator)"| MB
+  B_G -->|"app-group offsets"| MB
+  B_SR -->|"schemas"| MB
+
+  subgraph PROXY["«component» Kroxylicious 0.24.0 · one proxy per source"]
+    direction TB
+    KA["kroxylicious-a (step 4)<br/>ConsumerGroupPrefix filter, prefix a_<br/>request: app-group → a_app-group<br/>response: a_app-group → app-group"]
+    KB["kroxylicious-b (step 4)<br/>ConsumerGroupPrefix filter, prefix b_<br/>request: app-group → b_app-group<br/>response: b_app-group → app-group"]
+  end
+
+  MA ==>|"Kafka: a_* records<br/>+ offset commits for app-group"| KA
+  MB ==>|"Kafka: b_* records<br/>+ offset commits for app-group"| KB
+
+  subgraph DEST["«cluster» Destination · redpanda-dest"]
+    direction TB
+    D_T["topics<br/>a_orders · a_payments<br/>b_orders · b_payments"]
+    D_G["consumer groups<br/>a_app-group · b_app-group"]
+    D_SR[("Schema Registry<br/>a_orders-value · b_orders-value")]
+  end
+
+  KA ==>|"records unchanged"| D_T
+  KA ==>|"group IDs prefixed"| D_G
+  KB ==> D_T
+  KB ==> D_G
+  MA -.->|"HTTP, bypasses proxy"| D_SR
+  MB -.->|"HTTP, bypasses proxy"| D_SR
+
+  DCA(["app consumer A after cutover (step 11)<br/>group a_app-group"]) -.->|"resumes at translated offset"| D_T
+  DCB(["app consumer B after cutover (step 11)<br/>group b_app-group"]) -.->|"resumes at translated offset"| D_T
+```
+
+- **Thick arrows** are Kafka traffic from each migrator's output. It all goes through that source's own proxy: records, topic creation, and consumer group offset commits.
+- **Thin arrows** are direct connections: the applications on the sources, and each migrator's input reading its source (records, `app-group` offsets, schemas).
+- **Dotted arrows** go around the proxies. Schema Registry traffic is HTTP, so it goes straight to the destination; the dotted consumer arrows show the applications after the cutover.
+
+The migrator keeps topic and group names apart differently. It prefixes topics and schema subjects itself (`topic` / `subject` interpolation). It can't rename consumer groups, so the proxy's ConsumerGroupPrefix filter does that: it rewrites `app-group` to `a_app-group` on every group request and strips the prefix again from responses. Nothing else is changed. Without the proxies, both sources would share one `app-group` on the destination.
+
+## Running it
+
 Run the scripts in order from any directory, one at a time, and read each script's output before moving on. Every script is independent: it checks its preconditions and says what to run next.
 
 **Prerequisites:** Docker with Compose v2, Go 1.26+, and network access to pull images the first time. No local Maven or JDK is needed; the proxy filter is compiled inside its Docker build.
