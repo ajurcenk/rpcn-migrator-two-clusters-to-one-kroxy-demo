@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | Command | What it does |
 |---|---|
-| `make step1-verify` | Checks the file:line references in the Step 1 inventory against the migrator source, the franz-go module cache, and `tests/go.mod` |
+| `MIGRATOR_SRC=… make step1-verify` | Checks the file:line references in the Step 1 inventory against the migrator source, the franz-go module cache, and `tests/go.mod` |
 | `make filter-test` | Filter unit tests (Maven in `maven:3.9-eclipse-temurin-21`, `~/.m2` mounted; no local Maven) |
 | `make step2` | Unit tests + proxy integration test on a fresh stack, then tear down |
 | `make step3` / `make step3-negative` | End-to-end run with / without proxies, then tear down |
@@ -33,11 +33,13 @@ Two Redpanda Migrator pipelines replicate source clusters A and B into one desti
 
 ## External inputs (outside this repo)
 
-| Item | Path |
+Local checkouts are referred to by these environment variables; set them to wherever the checkouts live on your machine.
+
+| Item | Location |
 |---|---|
-| Redpanda Connect / Migrator source v4.100.0 | `$MIGRATOR_SRC` |
-| Kroxylicious source | `$KROXYLICIOUS_SRC` |
-| Kroxylicious topic-rename example | `$KROXY_DEMO_SRC` |
+| Redpanda Connect / Migrator source v4.100.0 (github.com/redpanda-data/connect, tag `v4.100.0`) | `$MIGRATOR_SRC` (`make step1-verify` requires it) |
+| Kroxylicious source (github.com/kroxylicious/kroxylicious) | `$KROXYLICIOUS_SRC` |
+| Kroxylicious topic-rename example (`kroxy-linking-demo`) | `$KROXY_DEMO_SRC` |
 
 Read `kroxy-linking-demo` end to end before writing filter code. It is the source of truth for the Kroxylicious version, the build tool, how the filter JAR reaches the proxy classpath, the proxy YAML schema, and Compose conventions. The Kroxylicious config schema has changed across releases, so do not trust config snippets from memory or from the spec over the demo.
 

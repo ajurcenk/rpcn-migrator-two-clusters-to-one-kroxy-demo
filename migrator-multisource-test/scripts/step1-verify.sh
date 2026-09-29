@@ -3,6 +3,7 @@
 # still point at the expected code. Fails if the migrator or franz-go sources drift.
 set -euo pipefail
 
+# MIGRATOR_SRC: a checkout of github.com/redpanda-data/connect at tag v4.100.0.
 CONNECT="${MIGRATOR_SRC:?set MIGRATOR_SRC to a Redpanda Connect v4.100.0 checkout}/connect"
 MODCACHE="${GOMODCACHE:-$(go env GOMODCACHE)}"
 declare -A PREFIX=(

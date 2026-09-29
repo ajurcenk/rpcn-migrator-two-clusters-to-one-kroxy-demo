@@ -4,7 +4,7 @@
 # the "connect" build context, e.g.:
 #
 #   docker build -t rpcn-migrator:v4.100.0 \
-#     --build-context connect=$MIGRATOR_SRC/connect \
+#     --build-context connect="$MIGRATOR_SRC/connect" \
 #     migrator
 #
 # The repo's own resources/docker/Dockerfile only packages a goreleaser-built binary, so it can't be

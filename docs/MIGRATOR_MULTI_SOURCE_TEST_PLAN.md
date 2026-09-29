@@ -15,10 +15,12 @@ Without intervention, the migrator writes source group names unchanged to the de
 
 ## 1. Inputs
 
-| Item | Path |
+Local checkouts are referred to by these environment variables; set them to wherever the checkouts live on your machine.
+
+| Item | Location |
 |---|---|
-| Redpanda Migrator (Redpanda Connect) source, v4.100.0 | `$MIGRATOR_SRC` |
-| Kroxylicious source | `$KROXYLICIOUS_SRC` |
+| Redpanda Migrator (Redpanda Connect) source, v4.100.0 (github.com/redpanda-data/connect, tag `v4.100.0`) | `$MIGRATOR_SRC` |
+| Kroxylicious source (github.com/kroxylicious/kroxylicious) | `$KROXYLICIOUS_SRC` |
 | Kroxylicious topic-rename example (reference for filter structure, build, config format, compose wiring) | `$KROXY_DEMO_SRC` |
 
 **Before writing any code**, read `kroxy-linking-demo` end to end. Reuse its build setup (Maven/Gradle, Kroxylicious version, how the filter JAR is placed on the proxy classpath), its proxy YAML format, and its Docker Compose conventions. The Kroxylicious config schema has changed across releases (`filterDefinitions`, `defaultFilters`, per-virtual-cluster `filters`, `gateways`, `bootstrapServers`); the demo is the source of truth for the version in use, not this document.

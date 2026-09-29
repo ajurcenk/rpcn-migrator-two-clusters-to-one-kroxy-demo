@@ -12,7 +12,7 @@ Step 1 deliverable. It lists every Kafka request the migrator issues that carrie
 | `kadm/` | `$GOMODCACHE/github.com/twmb/franz-go/pkg/kadm@v1.17.2/` | kadm v1.17.2 |
 | `kmsg/` | `$GOMODCACHE/github.com/twmb/franz-go/pkg/kmsg@v1.12.0/` | kmsg v1.12.0 |
 
-Here `$GOMODCACHE` is `$(go env GOMODCACHE)`. The versions come from `connect/go.mod`. Every high-level call listed below was traced into the franz-go source to find the wire requests it produces.
+Here `$MIGRATOR_SRC` is a checkout of github.com/redpanda-data/connect at tag `v4.100.0`, and `$GOMODCACHE` is the Go module cache (`go env GOMODCACHE`). The versions come from `connect/go.mod`. Every high-level call listed below was traced into the franz-go source to find the wire requests it produces.
 
 The migrator uses franz-go (`kgo`/`kadm`/`kmsg`) for all Kafka traffic. The Sarama-based inputs in `kafka/` are not used.
 

@@ -9,10 +9,10 @@ Deliverables:
 - `docs/findings.md`
 
 ```sh
-make step1-verify
+MIGRATOR_SRC=/path/to/connect-v4.100.0 make step1-verify
 ```
 
-This checks that every key file:line reference in the inventory still matches the migrator source (`MIGRATOR_SRC`, default `$MIGRATOR_SRC`) and the franz-go module cache (`GOMODCACHE`). The reference list is `scripts/step1-refs.txt`.
+This checks that every key file:line reference in the inventory still matches the migrator source (`MIGRATOR_SRC`, a checkout of github.com/redpanda-data/connect at tag `v4.100.0`; required) and the franz-go module cache (`GOMODCACHE`). The reference list is `scripts/step1-refs.txt`.
 
 ## Step 2: ConsumerGroupPrefix filter and proxy test
 
