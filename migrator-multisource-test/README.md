@@ -77,3 +77,7 @@ docker run --rm -v "$PWD/migrator:/cfg:ro,z" docker.redpanda.com/redpandadata/co
 ## Runbook: manual migration with live traffic
 
 `runbook/` walks through a full migration as eleven independent scripts, run by hand: clusters, then producers and consumers on the sources, then proxies and migrators, checks on data and offset translation, stopping source traffic, and finally moving the consumers to the destination and checking where they resume. See [`runbook/README.md`](runbook/README.md).
+
+## Runbook: the same migration with TLS and SASL/SCRAM
+
+`runbook-tls-scram/` repeats the runbook with TLS and SCRAM-SHA-256 on every Kafka connection, and HTTPS + basic auth on every Schema Registry. The proxies terminate TLS, open their own TLS connection to the destination, and pass SASL through unchanged. It has its own stack (`compose/docker-compose.tls-scram.yaml`), configs and ports, so it can run at the same time as the plaintext one. See [`runbook-tls-scram/README.md`](runbook-tls-scram/README.md) and [`runbook-tls-scram/FINDINGS.md`](runbook-tls-scram/FINDINGS.md).
