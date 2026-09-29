@@ -1,0 +1,152 @@
+# TLS + SASL/SCRAM variant of the Step 3 stack, used by runbook-tls-scram/. Same topology as
+# docker-compose.step3.yaml (sources redpanda-a / redpanda-b, destination redpanda-dest, one
+# Kroxylicious proxy and one migrator per source), but every Kafka listener is TLS + SCRAM-SHA-256
+# and every Schema Registry listener is HTTPS + HTTP basic auth. The proxies terminate client TLS
+# with their own certificate, re-encrypt to redpanda-dest, and pass the SASL exchange through.
+#
+# Separate compose project and host ports from Step 3, so the two stacks can run side by side:
+#   A kafka 19093 / SR 18082 / admin 19645, B 29093 / 28082 / 29645, dest 39093 / 38082 / 39645;
+#   proxies: kafka bootstrap A 19192 / B 29192 (for the runbook's auth checks), metrics 19191 / 29191.
+#
+# Certificates come from TLS_DIR (default: the runbook's .state/tls, written by ensure_certs in
+# runbook-tls-scram/lib.sh). SASL passwords come from the environment (lib.sh exports them from
+# .state/secrets.env); run compose through the runbook scripts, or source that file first.
+name: cgprefix-tls-scram
+
+x-redpanda-image: &redpanda-image docker.redpanda.com/redpandadata/redpanda:v26.2.2
+x-proxy-health: &proxy-health
+  test: ["CMD", "curl", "-sf", "localhost:9190/livez"]
+  interval: 2s
+  timeout: 5s
+  retries: 30
+x-redpanda-health: &redpanda-health
+  test: ["CMD-SHELL", "rpk cluster health -X admin.hosts=localhost:9644 | grep -E 'Healthy:.+true' || exit 1"]
+  interval: 2s
+  timeout: 5s
+  retries: 30
+# Renders redpanda/tls-scram/redpanda.yaml.tmpl for this service, installs the cluster bootstrap
+# file, then starts Redpanda the usual way. No --kafka-addr flags: they would replace the
+# listeners (and their TLS/SASL settings) from the template.
+x-redpanda-entrypoint: &redpanda-entrypoint
+  - bash
+  - -c
+  - |
+    sed -e "s/@NAME@/$$RP_NAME/g" -e "s/@KAFKA_PORT@/$$RP_KAFKA_PORT/g" -e "s/@SR_PORT@/$$RP_SR_PORT/g" \
+      /cfg/redpanda.yaml.tmpl > /etc/redpanda/redpanda.yaml
+    cp "/cfg/$$RP_BOOTSTRAP" /etc/redpanda/.bootstrap.yaml
+    exec /entrypoint.sh redpanda start --mode=dev-container --smp=1
+
+services:
+  redpanda-a:
+    image: *redpanda-image
+    entrypoint: *redpanda-entrypoint
+    environment:
+      RP_NAME: redpanda-a
+      RP_KAFKA_PORT: "19093"
+      RP_SR_PORT: "18082"
+      RP_BOOTSTRAP: bootstrap-source.yaml
+    volumes:
+      - ../redpanda/tls-scram:/cfg:ro,z
+      - ${TLS_DIR:-../runbook-tls-scram/.state/tls}:/certs:ro,z
+    ports:
+      - "19093:19093"
+      - "18082:18082"
+      - "19645:9644"
+    healthcheck: *redpanda-health
+
+  redpanda-b:
+    image: *redpanda-image
+    entrypoint: *redpanda-entrypoint
+    environment:
+      RP_NAME: redpanda-b
+      RP_KAFKA_PORT: "29093"
+      RP_SR_PORT: "28082"
+      RP_BOOTSTRAP: bootstrap-source.yaml
+    volumes:
+      - ../redpanda/tls-scram:/cfg:ro,z
+      - ${TLS_DIR:-../runbook-tls-scram/.state/tls}:/certs:ro,z
+    ports:
+      - "29093:29093"
+      - "28082:28082"
+      - "29645:9644"
+    healthcheck: *redpanda-health
+
+  redpanda-dest:
+    image: *redpanda-image
+    entrypoint: *redpanda-entrypoint
+    environment:
+      RP_NAME: redpanda-dest
+      RP_KAFKA_PORT: "39093"
+      RP_SR_PORT: "38082"
+      RP_BOOTSTRAP: bootstrap-dest.yaml
+    volumes:
+      - ../redpanda/tls-scram:/cfg:ro,z
+      - ${TLS_DIR:-../runbook-tls-scram/.state/tls}:/certs:ro,z
+    ports:
+      - "39093:39093"
+      - "38082:38082"
+      - "39645:9644"
+    healthcheck: *redpanda-health
+
+  # Same image as Step 3 (the filter is unchanged); only the proxy config differs.
+  kroxylicious-a:
+    build: ../kroxylicious-filter
+    image: cgprefix-proxy:0.24.0
+    command: --config /opt/kroxylicious/config/proxy-config.yaml
+    volumes:
+      - ../proxy/config-tls-scram-a.yaml:/opt/kroxylicious/config/proxy-config.yaml:ro,z
+      - ${TLS_DIR:-../runbook-tls-scram/.state/tls}:/certs:ro,z
+    healthcheck: *proxy-health
+    ports:
+      - "19192:9192"
+      - "19191:9190"
+    depends_on:
+      redpanda-dest:
+        condition: service_healthy
+
+  kroxylicious-b:
+    build: ../kroxylicious-filter
+    image: cgprefix-proxy:0.24.0
+    command: --config /opt/kroxylicious/config/proxy-config.yaml
+    volumes:
+      - ../proxy/config-tls-scram-b.yaml:/opt/kroxylicious/config/proxy-config.yaml:ro,z
+      - ${TLS_DIR:-../runbook-tls-scram/.state/tls}:/certs:ro,z
+    healthcheck: *proxy-health
+    ports:
+      - "29192:9192"
+      - "29191:9190"
+    depends_on:
+      redpanda-dest:
+        condition: service_healthy
+
+  migrator-a:
+    image: docker.redpanda.com/redpandadata/connect:4.100.0
+    profiles: [ migrators ]
+    command: [ "run", "/cfg/migrator-a.yaml" ]
+    environment:
+      SRC_SASL_PASSWORD: ${MIGRATOR_PASSWORD:-}
+      DEST_SASL_PASSWORD: ${MIGRATOR_A_PASSWORD:-}
+    volumes:
+      - ../migrator/tls-scram:/cfg:ro,z
+      - ${TLS_DIR:-../runbook-tls-scram/.state/tls}:/certs:ro,z
+    depends_on:
+      redpanda-a:
+        condition: service_healthy
+      kroxylicious-a:
+        condition: service_healthy
+
+  migrator-b:
+    image: docker.redpanda.com/redpandadata/connect:4.100.0
+    profiles: [ migrators ]
+    command: [ "run", "/cfg/migrator-b.yaml" ]
+    environment:
+      SRC_SASL_PASSWORD: ${MIGRATOR_PASSWORD:-}
+      DEST_SASL_PASSWORD: ${MIGRATOR_B_PASSWORD:-}
+    volumes:
+      - ../migrator/tls-scram:/cfg:ro,z
+      - ${TLS_DIR:-../runbook-tls-scram/.state/tls}:/certs:ro,z
+    depends_on:
+      redpanda-b:
+        condition: service_healthy
+      kroxylicious-b:
+        condition: service_healthy

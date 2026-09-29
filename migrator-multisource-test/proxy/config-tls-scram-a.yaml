@@ -1,0 +1,41 @@
+# TLS/SCRAM runbook, proxy for source A: the Step 3 layout (proxy/config-step3-a.yaml) with TLS
+# on both sides. migrator-a's output connects to kroxylicious-a:9192 over TLS (the gateway
+# presents kroxylicious-a.crt, SAN kroxylicious-a + localhost); the proxy opens its own TLS
+# connection to redpanda-dest:9092 and trusts the demo CA.
+#
+# SASL passthrough: no SASL filter is configured, so SaslHandshake / SaslAuthenticate are
+# forwarded unchanged and migrator-a authenticates against redpanda-dest itself. SCRAM isn't
+# channel-bound, so the two TLS hops don't disturb it. The ConsumerGroupPrefix filter only
+# touches group APIs.
+management:
+  endpoints:
+    prometheus: {}
+virtualClusters:
+  - name: dest-a
+    targetCluster:
+      bootstrapServers: redpanda-dest:9092
+      tls:
+        trust:
+          storeFile: /certs/ca.crt
+          storeType: PEM
+    gateways:
+      - name: compose
+        portIdentifiesNode:
+          bootstrapAddress: kroxylicious-a:9192
+          nodeIdRanges:
+            - name: default
+              start: 0
+              end: 0
+        tls:
+          key:
+            privateKeyFile: /certs/kroxylicious-a.key
+            certificateFile: /certs/kroxylicious-a.crt
+    filters:
+      - cg-prefix-a
+    logNetwork: false
+    logFrames: false
+filterDefinitions:
+  - name: cg-prefix-a
+    type: demo.cgprefix.ConsumerGroupPrefix
+    config:
+      prefix: "a_"

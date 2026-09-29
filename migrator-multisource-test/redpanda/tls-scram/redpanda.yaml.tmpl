@@ -1,0 +1,75 @@
+# Node config template for the TLS/SCRAM runbook's three clusters. The compose entrypoint
+# substitutes @NAME@ (service name, also the certificate name), @KAFKA_PORT@ and @SR_PORT@ (the
+# host-facing ports) and writes the result to /etc/redpanda/redpanda.yaml; `--mode dev-container`
+# adds its usual development settings on top.
+#
+# Kafka: two listeners, both TLS + SASL (internal for containers, external for the host).
+# Schema Registry: two listeners, both HTTPS + HTTP basic auth (SCRAM users).
+# Admin API: plaintext and unauthenticated, so the healthcheck and `rpk security user` work.
+redpanda:
+  data_directory: /var/lib/redpanda/data
+  seed_servers: []
+  rpc_server:
+    address: 0.0.0.0
+    port: 33145
+  advertised_rpc_api:
+    address: @NAME@
+    port: 33145
+  kafka_api:
+    - name: internal
+      address: 0.0.0.0
+      port: 9092
+      authentication_method: sasl
+    - name: external
+      address: 0.0.0.0
+      port: @KAFKA_PORT@
+      authentication_method: sasl
+  advertised_kafka_api:
+    - name: internal
+      address: @NAME@
+      port: 9092
+    - name: external
+      address: localhost
+      port: @KAFKA_PORT@
+  kafka_api_tls:
+    - name: internal
+      enabled: true
+      require_client_auth: false
+      cert_file: /certs/@NAME@.crt
+      key_file: /certs/@NAME@.key
+      truststore_file: /certs/ca.crt
+    - name: external
+      enabled: true
+      require_client_auth: false
+      cert_file: /certs/@NAME@.crt
+      key_file: /certs/@NAME@.key
+      truststore_file: /certs/ca.crt
+  admin:
+    - address: 0.0.0.0
+      port: 9644
+schema_registry:
+  schema_registry_api:
+    - name: internal
+      address: 0.0.0.0
+      port: 8081
+      authentication_method: http_basic
+    - name: external
+      address: 0.0.0.0
+      port: @SR_PORT@
+      authentication_method: http_basic
+  schema_registry_api_tls:
+    - name: internal
+      enabled: true
+      require_client_auth: false
+      cert_file: /certs/@NAME@.crt
+      key_file: /certs/@NAME@.key
+      truststore_file: /certs/ca.crt
+    - name: external
+      enabled: true
+      require_client_auth: false
+      cert_file: /certs/@NAME@.crt
+      key_file: /certs/@NAME@.key
+      truststore_file: /certs/ca.crt
+rpk:
+  overprovisioned: true
+  coredump_dir: /var/lib/redpanda/coredump

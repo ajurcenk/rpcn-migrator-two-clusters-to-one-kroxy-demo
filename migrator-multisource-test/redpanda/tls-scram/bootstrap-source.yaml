@@ -1,0 +1,6 @@
+# Cluster properties applied on first start of redpanda-a / redpanda-b (TLS/SCRAM runbook).
+# SASL is required on every Kafka listener; all runbook users are superusers (no ACLs).
+# The users themselves are created by runbook-tls-scram/01-start-clusters.sh.
+enable_sasl: true
+sasl_mechanisms: [ SCRAM ]
+superusers: [ admin, app, migrator ]

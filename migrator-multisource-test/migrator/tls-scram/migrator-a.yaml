@@ -1,0 +1,63 @@
+# TLS/SCRAM runbook: source A -> destination. Same pipeline as migrator/migrator-a.yaml, with
+# TLS (demo CA) and SCRAM-SHA-256 on every connection:
+#   - input:  redpanda-a:9092 directly, user "migrator"; Schema Registry https://redpanda-a:8081
+#             with HTTP basic auth as the same user.
+#   - output: kroxylicious-a:9192 (TLS to the proxy, SASL passed through to redpanda-dest), user
+#             "migrator-a"; the proxy prefixes group IDs with "a_". Schema Registry is HTTPS
+#             straight to redpanda-dest, basic auth as migrator-a.
+# Passwords come from the environment (SRC_SASL_PASSWORD / DEST_SASL_PASSWORD, set by the compose
+# file from runbook-tls-scram/.state/secrets.env).
+#
+# No `label`s, for the same reason as migrator/migrator-a.yaml (lint rejects duplicate labels;
+# unlabelled, input and output both pair up as "default").
+input:
+  redpanda_migrator:
+    seed_brokers: [ "redpanda-a:9092" ]
+    tls:
+      enabled: true
+      root_cas_file: /certs/ca.crt
+    sasl:
+      - mechanism: SCRAM-SHA-256
+        username: migrator
+        password: "${SRC_SASL_PASSWORD}"
+    regexp_topics_include: [ '.' ]
+    regexp_topics_exclude: [ '^_' ]
+    consumer_group: migrator
+    schema_registry:
+      url: https://redpanda-a:8081
+      tls:
+        enabled: true
+        root_cas_file: /certs/ca.crt
+      basic_auth:
+        enabled: true
+        username: migrator
+        password: "${SRC_SASL_PASSWORD}"
+
+output:
+  redpanda_migrator:
+    seed_brokers: [ "kroxylicious-a:9192" ]
+    tls:
+      enabled: true
+      root_cas_file: /certs/ca.crt
+    sasl:
+      - mechanism: SCRAM-SHA-256
+        username: migrator-a
+        password: "${DEST_SASL_PASSWORD}"
+    topic: 'a_${! @kafka_topic }'
+    provenance_header: "x-source-cluster"
+    offset_header: "x-source-offset"
+    schema_registry:
+      url: https://redpanda-dest:8081
+      tls:
+        enabled: true
+        root_cas_file: /certs/ca.crt
+      basic_auth:
+        enabled: true
+        username: migrator-a
+        password: "${DEST_SASL_PASSWORD}"
+      subject: 'a_${! metadata("schema_registry_subject") }'
+      translate_ids: true
+    consumer_groups:
+      enabled: true
+      interval: 10s
+      exclude: [ "^migrator$" ]

@@ -15,6 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `make step2` | Unit tests + proxy integration test on a fresh stack, then tear down |
 | `make step3` / `make step3-negative` | End-to-end run with / without proxies, then tear down |
 | `runbook/01-…sh` … `11-…sh`, `99-teardown.sh` | Manual migration walk-through with live producers and consumers (see `runbook/README.md`); uses the Step 3 stack, so never alongside `make step3` |
+| `runbook-tls-scram/00-…sh` … `11-…sh`, `99-teardown.sh` | Same walk-through with TLS + SASL/SCRAM-SHA-256 on every hop (see `runbook-tls-scram/README.md`, results in `runbook-tls-scram/FINDINGS.md`). Own stack (`compose/docker-compose.tls-scram.yaml`, project `cgprefix-tls-scram`, ports 19093/29093/39093 …), so it can run alongside the plaintext one |
 | `make step3-known-issues` | Migrator requirements Connect 4.100.0 doesn't meet. **Expected to fail**; keep it out of `make step3` |
 | `make step2-up` / `step2-test` / `step2-down` | Iterate on a running Step 2 stack (same pattern for `step3-*`) |
 
@@ -69,6 +70,7 @@ Read `kroxy-linking-demo` end to end before writing filter code. It is the sourc
   - Active source groups get timestamp-only translation, which is always behind with bulk-produced data.
   - A translated source offset is never re-translated until it changes.
   - After a restart, group sync is idle until the migrator writes a record (or 5 minutes pass), and exact translation fails for topics it hasn't written to.
+- **The TLS/SCRAM runbook is separate from the plaintext one.** Its configs are new files (`migrator/tls-scram/`, `proxy/config-tls-scram-*.yaml`, `redpanda/tls-scram/`) and it has its own `rbtool` copy. Don't share or modify the plaintext runbook's artifacts for it. Certificates and SCRAM passwords are generated into `runbook-tls-scram/.state/`. The proxies use SASL passthrough (no SASL filter), and all users are superusers (no ACLs).
 - **Runbook scripts `source lib.sh`**, which sets `set -euo pipefail`. Don't source it into an interactive shell; use `bash -c 'source ./lib.sh; …'`.
 - **Makefile recipes:** `GOTEST3` starts with `cd tests &&`, so call test targets through `$(MAKE)`. Inlining it makes the following teardown run in the wrong directory.
 - **Proxy DEBUG log lines** look like `api=OFFSET_FETCH version=8 request group 'x' -> 'a_x'`. The logger name prints abbreviated as `de.cg.ConsumerGroupPrefixFilter`, so grep for that, not `demo.cgprefix`.
